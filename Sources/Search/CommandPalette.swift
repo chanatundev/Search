@@ -7,6 +7,7 @@ struct CommandPalette: View {
     @ObservedObject var browser: Browser
     @State private var query = ""
     @State private var selected = 0
+    @State private var hoveredCommandID: String?
     @FocusState private var searchFocused: Bool
 
     private var tabCommands: [PaletteCommand] {
@@ -82,7 +83,10 @@ struct CommandPalette: View {
             .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
         }
         .onAppear { DispatchQueue.main.async { searchFocused = true } }
-        .onChange(of: query) { _, _ in selected = 0 }
+        .onChange(of: query) { _, _ in
+            selected = 0
+            hoveredCommandID = nil
+        }
     }
 
     private var panel: some View {
@@ -130,9 +134,15 @@ struct CommandPalette: View {
                             .frame(maxWidth: .infinity, minHeight: 64)
                     } else {
                         ForEach(Array(matches.enumerated()), id: \.element.id) { index, command in
-                            row(command, selected: index == selected)
+                            row(command, selected: command.id == hoveredCommandID || (hoveredCommandID == nil && index == selected))
                                 .id(command.id)
-                                .onHover { if $0 { selected = index } }
+                                .onHover { hovering in
+                                    if hovering {
+                                        hoveredCommandID = command.id
+                                    } else if hoveredCommandID == command.id {
+                                        hoveredCommandID = nil
+                                    }
+                                }
                         }
                     }
                 }
@@ -193,6 +203,7 @@ struct CommandPalette: View {
     }
 
     private func moveSelection(_ amount: Int) {
+        hoveredCommandID = nil
         let enabled = matches.indices.filter { matches[$0].enabled }
         guard !enabled.isEmpty else { selected = 0; return }
         let current = enabled.firstIndex(of: selected) ?? (amount > 0 ? -1 : 0)
