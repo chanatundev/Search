@@ -302,6 +302,7 @@ struct AddressField: NSViewRepresentable {
         if coordinator.answered != browser.focusRequest {
             coordinator.answered = browser.focusRequest
             DispatchQueue.main.async {
+                guard !browser.commandPalette else { return }
                 field.window?.makeFirstResponder(field)
                 guard let editor = field.currentEditor() as? NSTextView else { return }
                 // The system paints selected text as a block of accent colour,

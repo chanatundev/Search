@@ -33,6 +33,9 @@ struct SearchApp: App {
                 Divider()
                 Button("Close Tab") { if let tab = browser.active { browser.close(tab) } }
                     .keyboardShortcut("w")
+                Divider()
+                Button("Command Palette…") { browser.commandPalette.toggle() }
+                    .keyboardShortcut("e")
             }
             CommandGroup(replacing: .printItem) {
                 Button("Share…") { browser.share() }
@@ -445,6 +448,9 @@ struct ContentView: View {
         if browser.managing {
             sheet { PasswordsPanel(browser: browser) } close: { browser.managing = false }
         }
+        if browser.commandPalette {
+            sheet { CommandPalette(browser: browser) } close: { browser.commandPalette = false }
+        }
         if browser.reviewing {
             // No dimming for this one: the whole point is to keep looking at
             // the page while the list offers to put things back on it.
@@ -504,19 +510,27 @@ struct ContentView: View {
                 browser.appBack()
             }
             .onChange(of: browser.fieldShowing) { _, showing in
+                guard !browser.commandPalette else { return }
                 if showing {
-                    DispatchQueue.main.async { browser.askFocus() }
+                    DispatchQueue.main.async {
+                        guard !browser.commandPalette else { return }
+                        browser.askFocus()
+                    }
                 } else {
                     handBack()
                 }
             }
             .onChange(of: browser.activeID) { _, _ in handBack() }
+            .onChange(of: browser.commandPalette) { _, showing in
+                if !showing { returnPaletteFocus() }
+            }
             .animation(Motion.settle, value: browser.recalling)
             .animation(Motion.settle, value: browser.hoarding)
             .animation(Motion.settle, value: browser.tuning)
             .animation(Motion.settle, value: browser.welcoming)
             .animation(Motion.settle, value: browser.bookmarking)
             .animation(Motion.settle, value: browser.managing)
+            .animation(Motion.settle, value: browser.commandPalette)
             .animation(Motion.settle, value: browser.reviewing)
         .onAppear {
             watchKeys()
@@ -535,10 +549,26 @@ struct ContentView: View {
     /// WebAuthn refuses to run on a document that isn't focused, and so do a
     /// number of paste and shortcut handlers pages install for themselves.
     private func handBack() {
-        guard !browser.fieldShowing, browser.editingTab == nil else { return }
+        guard !browser.commandPalette, !browser.fieldShowing, browser.editingTab == nil else { return }
         DispatchQueue.main.async {
-            guard let web = browser.active?.web, let window = web.window else { return }
+            guard !browser.commandPalette,
+                  let web = browser.active?.web,
+                  let window = web.window
+            else { return }
             window.makeFirstResponder(web)
+        }
+    }
+
+    /// Closing the palette returns keys to the page unless its command opened
+    /// another panel or left a browser field in use.
+    private func returnPaletteFocus() {
+        guard !browser.tuning, !browser.recalling, !browser.hoarding,
+              !browser.bookmarking, !browser.managing, browser.editingTab == nil
+        else { return }
+        if browser.fieldShowing {
+            browser.askFocus()
+        } else {
+            handBack()
         }
     }
 
@@ -806,6 +836,10 @@ struct ContentView: View {
         // Escape puts the page back. On a blank tab there is no page to put
         // back, so it belongs to whatever else wants it.
         if event.keyCode == 53 {
+            if browser.commandPalette {
+                browser.commandPalette = false
+                return true
+            }
             if browser.editingTab != nil {
                 browser.cancelTabEdit()
                 return true
@@ -918,6 +952,11 @@ struct ContentView: View {
             } else {
                 browser.select(index: number == 9 ? browser.tabs.count - 1 : number - 1)
             }
+            return true
+        }
+
+        if !shifted, key == "e" {
+            browser.commandPalette.toggle()
             return true
         }
 

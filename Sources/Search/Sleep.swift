@@ -61,6 +61,60 @@ extension Browser {
         for tab in idle { self.sleep(tab) }
     }
 
+    /// Immediately put down eligible tabs behind the one on screen, in this
+    /// space. `sleep(_:)` still protects pins, media, calls, downloads and text.
+    func sleepBackgroundTabs() {
+        putToSleep(tabs.filter { $0.id != activeID }, in: "the current space")
+    }
+
+    /// Put down every eligible tab in spaces other than the one on screen.
+    func sleepBackgroundSpaces() {
+        guard prefs.usesSpaces else {
+            announce("Turn on Spaces in Settings first")
+            return
+        }
+        putToSleep(parkedTabs, in: "background spaces")
+    }
+
+    private func putToSleep(_ candidates: [Tab], in place: String) {
+        let eligible = candidates.filter { awake(because: $0) == nil }
+        guard !eligible.isEmpty else {
+            announce("No tabs can sleep in \(place)")
+            return
+        }
+        let eligibleNoun = eligible.count == 1 ? "tab" : "tabs"
+        announce("Putting \(eligible.count) \(eligibleNoun) in \(place) to sleep…")
+        var next = 0
+        var finished = 0
+        var slept = 0
+
+        // Two in flight keeps the batch moving without asking WebKit to hold
+        // a snapshot bitmap for every tab at once.
+        func startNext() {
+            guard next < eligible.count else { return }
+            let tab = eligible[next]
+            next += 1
+            sleep(tab) { [weak self] result in
+                guard let self else { return }
+                if result == "asleep" { slept += 1 }
+                finished += 1
+                if finished == eligible.count {
+                    if slept == 0 {
+                        self.announce("No tabs in \(place) could sleep")
+                    } else {
+                        let noun = slept == 1 ? "tab" : "tabs"
+                        self.announce("\(slept) \(noun) in \(place) asleep")
+                    }
+                } else {
+                    startNext()
+                }
+            }
+        }
+
+        startNext()
+        startNext()
+    }
+
     /// Why a tab has to stay awake — nil when nothing keeps it. The clock is
     /// the caller's business; this is everything else.
     func awake(because tab: Tab) -> String? {

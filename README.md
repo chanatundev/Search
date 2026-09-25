@@ -58,8 +58,11 @@ A **private tab** (`⇧⌘N`) has its own cookie jar and leaves nothing behind w
 | | |
 |---|---|
 | `⌘L` address · `⌘K` switch tab · `⌘T` new tab · `⌘W` close · `⇧⌘T` reopen | `⌘[` `⌘]` back, forward · `⇧⌘[` `⇧⌘]` previous, next tab · `⌘1`–`⌘9` jump |
+| `⌘E` command palette: type an action, use `↑`/`↓`, press `Return` · `esc` closes it | `⌘D` duplicate · `⇧⌘C` copy address · `⇧⌘V` paste and go |
 | `⇧⌘S` tabs across the top or down the left · `⌘S` fold the sidebar away · `⇧⌘B` bookmark this page | `⇧⌘R` reading mode · `⇧⌘P` float the video · `⇧⌘H` hide something · `⇧⌘U` what is hidden here |
-| `⌘F` find · `⌘D` duplicate tab · `⇧⌘C` copy address · `⇧⌘V` paste and go | `⌘Y` history · `⇧⌘J` downloads · `⌘,` settings · `⌥⌘L` passwords |
+| `⌘F` find · `⌘Y` history · `⇧⌘J` downloads · `⌘,` settings · `⌥⌘L` passwords | `⌥⌘I` inspector · `⌥⌘J` console · `⌥⌘C` inspect element |
+
+Press `⌘E`, type a command, choose it with `↑`/`↓` and `Return`, or click it; `esc` closes the palette. **Sleep Background Tabs** puts eligible tabs behind the current one to sleep. **Sleep Background Spaces** does the same for tabs parked in other spaces and is available when Spaces is on.
 
 `⌃Tab` and `⌃⇧Tab` walk along the row of tabs; `Tab` stays the page's, for moving through a form. `esc` puts away whatever is open.
 

@@ -34,6 +34,8 @@ final class Browser: NSObject, ObservableObject {
     /// one of them changes.
     let prefs = Preferences()
     let linkStatus = LinkStatus()
+    /// The searchable list of browser commands, opened with ⌘E.
+    @Published var commandPalette = false
     /// The settings panel.
     @Published var tuning = false
     /// The first-launch walk-through, over everything. Also from the menu.
