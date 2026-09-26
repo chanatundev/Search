@@ -133,9 +133,11 @@ struct SearchApp: App {
                 Button("Duplicate Tab") { browser.duplicate() }
                     .keyboardShortcut("d")
                     .disabled(browser.active?.isBlank ?? true)
-                Button("Copy Address") { browser.copyAddress() }
+                Button(browser.tabsWithAddressesToCopy.count > 1
+                       ? "Copy \(browser.tabsWithAddressesToCopy.count) Tab Addresses"
+                       : "Copy Address") { browser.copyAddress() }
                     .keyboardShortcut("c", modifiers: [.command, .shift])
-                    .disabled(browser.active?.isBlank ?? true)
+                    .disabled(browser.tabsWithAddressesToCopy.isEmpty)
                 Button("Copy as Markdown Link") { browser.copyMarkdownLink() }
                     .disabled(browser.active?.isBlank ?? true)
                 Button("Paste and Go") { browser.pasteAndGo() }
@@ -960,8 +962,13 @@ struct ContentView: View {
             return true
         }
 
-        // The page's turn first, for the keys it may want (Refs #147).
-        if pageFirst(event, key: key, shifted: shifted) { return false }
+        // The page's turn first, for the keys it may want (Refs #147). Once
+        // tabs are selected, Copy Address belongs to that selection; a
+        // clipboard list belongs to Paste and Go.
+        let copyingSelectedTabs = key == "c" && shifted && !browser.selectedTabs.isEmpty
+        let pastingTabs = key == "v" && shifted && browser.clipboardContainsTabURLList
+        if !copyingSelectedTabs && !pastingTabs,
+           pageFirst(event, key: key, shifted: shifted) { return false }
 
         switch key {
         case "t" where !shifted:

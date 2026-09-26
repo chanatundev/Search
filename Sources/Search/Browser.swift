@@ -8,7 +8,83 @@ import Combine
 
 @MainActor
 final class Browser: NSObject, ObservableObject {
-    @Published private(set) var tabs: [Tab] = []
+    @Published private(set) var tabs: [Tab] = [] {
+        didSet { reconcileTabSelection() }
+    }
+    /// The tabs picked in the current space. The row is the source of order;
+    /// this set only records which identities are picked.
+    @Published private(set) var selectedTabIDs: Set<Tab.ID> = []
+    private var tabSelectionAnchor: Tab.ID?
+
+    var selectedTabs: [Tab] { tabs.filter { selectedTabIDs.contains($0.id) } }
+
+    /// A menu on a selected tab acts on the whole selection; a menu on any
+    /// other tab keeps the usual single-tab meaning.
+    func tabsForAction(on tab: Tab) -> [Tab] {
+        guard tabs.contains(where: { $0.id == tab.id }) else { return [] }
+        return selectedTabIDs.contains(tab.id) && selectedTabs.count > 1
+            ? selectedTabs
+            : [tab]
+    }
+
+    var tabsWithAddressesToCopy: [Tab] {
+        let targets = selectedTabs.isEmpty ? [active].compactMap { $0 } : selectedTabs
+        return targets.filter { $0.address != nil }
+    }
+
+    var clipboardContainsTabURLList: Bool {
+        guard let text = NSPasteboard.general.string(forType: .string) else { return false }
+        return pastedURLList(in: text) != nil
+    }
+
+    func clearTabSelection() {
+        guard !selectedTabIDs.isEmpty || tabSelectionAnchor != nil else { return }
+        selectedTabIDs = []
+        tabSelectionAnchor = nil
+    }
+
+    /// Handle a tab's ordinary click or a Command-click. Shift+Command adds
+    /// the inclusive range from the last Command-clicked tab.
+    @discardableResult
+    func handleTabClick(_ tab: Tab, modifiers: NSEvent.ModifierFlags) -> Bool {
+        let modifiers = modifiers.intersection(.deviceIndependentFlagsMask)
+        guard modifiers.contains(.command), modifiers.isDisjoint(with: [.option, .control]) else {
+            clearTabSelection()
+            return false
+        }
+        guard tabs.contains(where: { $0.id == tab.id }) else { return true }
+
+        if modifiers.contains(.shift) {
+            let anchor = tabSelectionAnchor.flatMap { id in tabs.firstIndex { $0.id == id } }
+                ?? tabs.firstIndex { $0.id == tab.id }!
+            let end = tabs.firstIndex { $0.id == tab.id }!
+            for index in min(anchor, end)...max(anchor, end) {
+                selectedTabIDs.insert(tabs[index].id)
+            }
+            if tabSelectionAnchor == nil { tabSelectionAnchor = tab.id }
+        } else {
+            if selectedTabIDs.contains(tab.id) {
+                selectedTabIDs.remove(tab.id)
+            } else {
+                selectedTabIDs.insert(tab.id)
+            }
+            tabSelectionAnchor = selectedTabIDs.isEmpty ? nil : tab.id
+        }
+        select(tab)
+        return true
+    }
+
+    private func reconcileTabSelection() {
+        guard !selectedTabIDs.isEmpty else { return }
+        let present = Set(tabs.map(\.id))
+        let kept = selectedTabIDs.intersection(present)
+        if kept != selectedTabIDs { selectedTabIDs = kept }
+        if let anchor = tabSelectionAnchor, !present.contains(anchor) {
+            tabSelectionAnchor = tabs.first(where: { kept.contains($0.id) })?.id
+        }
+        if kept.isEmpty { tabSelectionAnchor = nil }
+    }
+
     @Published var activeID: Tab.ID? {
         didSet {
             // The tab just left is the tab just looked at. Whether a tab has
@@ -662,11 +738,13 @@ final class Browser: NSObject, ObservableObject {
     @Published private(set) var announcement: String?
 
     /// ⌘⇧C. The address, in the clipboard, and a line that says as much.
-    func copyAddress() {
-        guard let url = active?.address else { return }
+    func copyAddress(for requested: [Tab]? = nil) {
+        let targets = requested ?? (selectedTabs.isEmpty ? [active].compactMap { $0 } : selectedTabs)
+        let addresses = targets.compactMap(\.address).map(\.absoluteString)
+        guard !addresses.isEmpty else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(url.absoluteString, forType: .string)
-        announce("Address copied")
+        NSPasteboard.general.setString(addresses.joined(separator: "\n"), forType: .string)
+        announce(addresses.count == 1 ? "Address copied" : "\(addresses.count) addresses copied")
     }
 
     /// For pasting into notes and messages that read Markdown: a title that
@@ -990,11 +1068,15 @@ final class Browser: NSObject, ObservableObject {
     }
 
     func writeSession(now: Bool = false) {
+        writeSession(tabs: tabs, active: activeID, space: spaceID, now: now)
+    }
+
+    func writeSession(tabs row: [Tab], active activeID: Tab.ID?, space: UUID, now: Bool = false) {
         Session.write(
             now: now,
-            space: spaceID,
+            space: space,
             .init(
-                tabs: tabs.compactMap { tab in
+                tabs: row.compactMap { tab in
                     guard !tab.shy, !tab.bench else { return nil }
                     // A sleeping tab holds its address in `pending`; asking for
                     // it there too means a pin can never be written out of
@@ -1006,7 +1088,7 @@ final class Browser: NSObject, ObservableObject {
                         url: url.absoluteString, title: tab.title, pin: tab.pin, name: tab.name
                     )
                 },
-                active: tabs.firstIndex { $0.id == activeID } ?? 0
+                active: row.firstIndex { $0.id == activeID } ?? 0
             )
         )
     }
@@ -1112,7 +1194,7 @@ final class Browser: NSObject, ObservableObject {
 
     /// ⌘W, or the cross on the tab. Closing the last one leaves a blank tab
     /// behind; closing that blank tab closes the window.
-    func close(_ tab: Tab) {
+    func close(_ tab: Tab, persistSession: Bool = true) {
         guard let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
 
         // A tab whose page is out in the little window takes the window with
@@ -1135,7 +1217,7 @@ final class Browser: NSObject, ObservableObject {
             } else {
                 newTab()
             }
-            writeSession(now: true)
+            if persistSession { writeSession(now: true) }
             return
         }
 
@@ -1164,7 +1246,30 @@ final class Browser: NSObject, ObservableObject {
             // instead of sitting there blank until a manual reload.
             select(tabs[min(index, tabs.count - 1)])
         }
-        rememberSession()
+        if persistSession { rememberSession() }
+    }
+
+    /// Close a stable snapshot of the requested tabs. Close non-active tabs
+    /// first and the originally active one last so the existing final-tab,
+    /// pinned-tab, private-tab, and floating-page behavior stays in charge.
+    func closeTabs(_ requested: [Tab]) {
+        let ids = Set(requested.map(\.id))
+        let closing = tabs.filter { ids.contains($0.id) }
+        guard !closing.isEmpty else { return }
+        let originalActive = activeID
+
+        for tab in closing where tab.id != originalActive { close(tab, persistSession: false) }
+        if let tab = closing.first(where: { $0.id == originalActive }) {
+            close(tab, persistSession: false)
+        }
+
+        if let originalActive,
+           !ids.contains(originalActive),
+           let stillOpen = tabs.first(where: { $0.id == originalActive }) {
+            select(stillOpen)
+        }
+        clearTabSelection()
+        writeSession(now: true)
     }
 
     /// Everything but this one. Pinned tabs are put down rather than removed —
@@ -1176,6 +1281,7 @@ final class Browser: NSObject, ObservableObject {
             close(tab)
         }
         select(keep)
+        clearTabSelection()
     }
 
     /// A link let go of over the tabs becomes a tab among them.
@@ -1236,6 +1342,72 @@ final class Browser: NSObject, ObservableObject {
         if tab.pin == nil, index < pinned { return }
         tabs.move(fromOffsets: IndexSet(integer: here), toOffset: index > here ? index + 1 : index)
         rememberSession()
+    }
+
+    /// Move tabs from this space into another space's parked row. Tabs whose
+    /// WebKit store matches keep their live page; crossing an isolated store
+    /// recreates the tab lazily at its current address under the destination
+    /// store, so cookies never cross the Space boundary.
+    func moveTabsToSpace(_ requested: [Tab], to destinationID: UUID) {
+        guard prefs.usesSpaces, destinationID != spaceID,
+              spaces.contains(where: { $0.id == destinationID })
+        else { return }
+
+        let ids = Set(requested.map(\.id))
+        let moving = tabs.filter { ids.contains($0.id) }
+        guard !moving.isEmpty else { return }
+        guard !moving.contains(where: \.bench) else {
+            announce("Benchmark tabs cannot move to another Space")
+            return
+        }
+        let oldActive = activeID
+        let oldActiveIndex = tabs.firstIndex { $0.id == oldActive } ?? 0
+        if let floating, ids.contains(floating) { land() }
+        if editingTab.map({ ids.contains($0) }) == true { cancelTabEdit() }
+        if peekTab != nil { closePeek() }
+
+        let destinationStore = Spaces.store(for: destinationID)
+        let transferred = moving.map { tab -> Tab in
+            // Private tabs keep their own temporary store. Extension pages
+            // also keep their extension-specific configuration.
+            let isExtensionPage = tab.address.map { Browser.extensionConfiguration(for: $0) != nil } ?? false
+            if tab.shy || isExtensionPage || tab.store === destinationStore { return tab }
+
+            let replacement = Tab(configuration: Web.configuration(space: destinationID))
+            prepare(replacement)
+            if let url = tab.pending ?? tab.address {
+                replacement.restore(url: url, title: tab.title, name: tab.name)
+            } else {
+                replacement.name = tab.name
+            }
+            replacement.pin = tab.pin
+            replacement.muted = tab.muted
+            tab.close()
+            return replacement
+        }
+
+        var destination = parked[destinationID] ?? loadRow(destinationID)
+        let movedPins = transferred.filter { $0.pin != nil }
+        let movedLoose = transferred.filter { $0.pin == nil }
+        destination.tabs = destination.tabs.filter { $0.pin != nil } + movedPins
+            + destination.tabs.filter { $0.pin == nil } + movedLoose
+        if destination.active == nil { destination.active = transferred.first?.id }
+        parked[destinationID] = destination
+
+        tabs.removeAll { ids.contains($0.id) }
+        clearTabSelection()
+        if let oldActive, !ids.contains(oldActive), tabs.contains(where: { $0.id == oldActive }) {
+            activeID = oldActive
+        } else if !tabs.isEmpty {
+            select(tabs[min(oldActiveIndex, tabs.count - 1)])
+        } else {
+            activeID = nil
+            newTab()
+        }
+
+        writeSession(now: true)
+        writeSession(tabs: destination.tabs, active: destination.active, space: destinationID, now: true)
+        announce("\(transferred.count) tab\(transferred.count == 1 ? "" : "s") moved to \(spaces.first { $0.id == destinationID }?.name ?? "Space")")
     }
 
     func step(_ direction: Int) {
@@ -1412,15 +1584,50 @@ final class Browser: NSObject, ObservableObject {
     /// ⌘⇧V, when nothing is being typed. What is in the clipboard, if it is a
     /// place — or a search — in the tab you're on.
     func pasteAndGo() {
-        guard let text = NSPasteboard.general.string(forType: .string),
-              let url = destination(for: text.trimmingCharacters(in: .whitespacesAndNewlines))
-        else {
+        guard let text = NSPasteboard.general.string(forType: .string) else {
+            refusals += 1
+            return
+        }
+
+        if let urls = pastedURLList(in: text) {
+            clearTabSelection()
+            let source = active
+            let opened = urls.map { url -> Tab in
+                let tab: Tab
+                if let source, source.shy {
+                    tab = Tab(shy: true, configuration: Web.configuration(shy: true, store: source.store))
+                } else {
+                    tab = Tab(configuration: Browser.extensionConfiguration(for: url))
+                }
+                prepare(tab)
+                tab.restore(url: url, title: "")
+                return tab
+            }
+            tabs.append(contentsOf: opened)
+            if let first = opened.first { select(first) }
+            announce("\(opened.count) tabs opened")
+            return
+        }
+
+        guard let url = destination(for: text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             refusals += 1
             return
         }
         (active ?? tabs.first)?.go(to: url)
         editing = false
         typed = ""
+    }
+
+    private func pastedURLList(in text: String) -> [URL]? {
+        let lines = text.split(whereSeparator: { $0.isNewline })
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard lines.count > 1 else { return nil }
+        let urls = lines.compactMap { URL(string: $0) }
+        guard urls.count == lines.count,
+              urls.allSatisfy({ ["http", "https"].contains($0.scheme?.lowercased() ?? "") && $0.host != nil })
+        else { return nil }
+        return urls
     }
 
     /// ⌘P. The system's own sheet, which is also where "save as PDF" lives.
@@ -2299,8 +2506,3 @@ extension Browser: WKDownloadDelegate {
         return candidate
     }
 }
-
-
-
-
-

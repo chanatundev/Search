@@ -99,6 +99,7 @@ struct SideBar: View {
         .animation(Motion.glide, value: browser.editingTab)
         .animation(Motion.settle, value: browser.tabs.map(\.id))
         .animation(Motion.settle, value: browser.pinnedCount)
+        .animation(Motion.quick, value: browser.selectedTabIDs)
     }
 
     /// The column's edge: pull it to make the column wider or narrower,
@@ -526,12 +527,32 @@ private struct PinSquare: View {
                     .fill(hovering ? Palette.hover : Palette.wash.opacity(0.55))
             }
         }
+        .overlay {
+            if browser.selectedTabIDs.contains(tab.id) {
+                RoundedRectangle(cornerRadius: scale * 9 / 34, style: .continuous)
+                    .strokeBorder(Palette.ink.opacity(live ? 0.38 : 0.28), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+        }
         .contentShape(RoundedRectangle(cornerRadius: scale * 9 / 34, style: .continuous))
-        .modifier(OneClick(double: live) {
+        .modifier(OneClick(double: live, onSingle: {
+            let modifiers = NSApp.currentEvent?.modifierFlags ?? []
+            if !modifiers.contains(.command) { browser.clearTabSelection() }
+        }) {
+            let modifiers = NSApp.currentEvent?.modifierFlags ?? []
+            if browser.handleTabClick(tab, modifiers: modifiers) { return }
             if live { browser.editLetter(tab) } else { browser.select(tab) }
         })
         // Put down, like ⌘W: close() is what knows a pin isn't removed.
         .overlay { MiddleClick { browser.close(tab) } }
+        .overlay {
+            if live && browser.editingPin != tab.id {
+                CommandTabClick { shift in
+                    let modifiers: NSEvent.ModifierFlags = shift ? [.command, .shift] : [.command]
+                    browser.handleTabClick(tab, modifiers: modifiers)
+                }
+            }
+        }
         .onHover { hovering = $0 }
         .contextMenu { TabMenu(browser: browser, tab: tab, close: { browser.close(tab) }) }
         .help(tab.label)
@@ -649,9 +670,18 @@ private struct SideRow: View {
         .animation(Motion.quick, value: tab.loading)
         .animation(Motion.quick, value: speaker)
         .background { ground }
+        .overlay {
+            if browser.selectedTabIDs.contains(tab.id) {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(Palette.ink.opacity(live ? 0.38 : 0.28), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+        }
         .modifier(Shake(travel: shake))
         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .modifier(OneClick(double: false) {
+            let modifiers = NSApp.currentEvent?.modifierFlags ?? []
+            if browser.handleTabClick(tab, modifiers: modifiers) { return }
             if live { browser.beginTabEdit(tab) } else { browser.select(tab) }
         })
         .overlay { MiddleClick(act: close) }

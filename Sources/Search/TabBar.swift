@@ -168,6 +168,7 @@ struct TabBar: View {
         // and the tabs appeared to jump aside.
         .animation(Motion.glide, value: browser.editingTab)
         .animation(Motion.settle, value: browser.tabs.map(\.id))
+        .animation(Motion.quick, value: browser.selectedTabIDs)
     }
 
     // MARK: - the spaces, one above the other
@@ -392,6 +393,13 @@ private struct TabPill: View {
             }
         }
         .background { ground }
+        .overlay {
+            if browser.selectedTabIDs.contains(tab.id) {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(Palette.ink.opacity(live ? 0.38 : 0.28), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+        }
         .modifier(Shake(travel: shake))
         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         // Never both at once.
@@ -405,7 +413,12 @@ private struct TabPill: View {
         // on has nothing to do on a single click, so it takes the double one
         // and edits its letter; everything else answers the first click at
         // once. Change Letter in the menu covers the rest.
-        .modifier(OneClick(double: live && pinned) {
+        .modifier(OneClick(double: live && pinned, onSingle: {
+            let modifiers = NSApp.currentEvent?.modifierFlags ?? []
+            if !modifiers.contains(.command) { browser.clearTabSelection() }
+        }) {
+            let modifiers = NSApp.currentEvent?.modifierFlags ?? []
+            if browser.handleTabClick(tab, modifiers: modifiers) { return }
             if live && pinned {
                 browser.editLetter(tab)
             } else if live && !pinned {
@@ -415,6 +428,14 @@ private struct TabPill: View {
             }
         })
         .overlay { MiddleClick(act: close) }
+        .overlay {
+            if live && pinned && browser.editingPin != tab.id {
+                CommandTabClick { shift in
+                    let modifiers: NSEvent.ModifierFlags = shift ? [.command, .shift] : [.command]
+                    browser.handleTabClick(tab, modifiers: modifiers)
+                }
+            }
+        }
         .onHover { hovering = $0 }
         .contextMenu { TabMenu(browser: browser, tab: tab, close: close) }
         .help(pinned || compact ? tab.label : "")
@@ -748,6 +769,9 @@ struct TabMenu: View {
     @ObservedObject var tab: Tab
     let close: () -> Void
 
+    private var actionTabs: [Tab] { browser.tabsForAction(on: tab) }
+    private var addressTabs: [Tab] { actionTabs.filter { $0.address != nil } }
+
     var body: some View {
         if tab.pin == nil {
             Button("Pin") { browser.pin(tab) }
@@ -769,19 +793,32 @@ struct TabMenu: View {
             browser.beginTabEdit(tab)
         }
         .disabled(tab.isBlank || tab.address == nil || tab.pin != nil)
-        Button("Copy Address") {
-            browser.select(tab)
-            browser.copyAddress()
+        Button(addressTabs.count > 1 ? "Copy \(addressTabs.count) Tab Addresses" : "Copy Address") {
+            browser.copyAddress(for: addressTabs)
         }
-        .disabled(tab.isBlank)
+        .disabled(addressTabs.isEmpty)
         Button("Copy as Markdown Link") {
             browser.select(tab)
             browser.copyMarkdownLink()
         }
         .disabled(tab.isBlank)
+        if browser.prefs.usesSpaces {
+            Menu(actionTabs.count > 1 ? "Move \(actionTabs.count) Tabs to Space" : "Move Tab to Space") {
+                ForEach(browser.spaces.filter { $0.id != browser.spaceID }) { space in
+                    Button(space.name) { browser.moveTabsToSpace(actionTabs, to: space.id) }
+                }
+            }
+            .disabled(browser.spaces.count < 2 || actionTabs.contains(where: \.bench))
+        }
         Button(tab.muted ? "Unmute Tab" : "Mute Tab") { tab.toggleMute() }
         Divider()
-        Button("Close Tab", action: close)
+        Button(actionTabs.count > 1 ? "Close \(actionTabs.count) Selected Tabs" : "Close Tab") {
+            if actionTabs.count > 1 {
+                browser.closeTabs(actionTabs)
+            } else {
+                close()
+            }
+        }
         Button("Close Other Tabs") { browser.closeOthers(but: tab) }
             .disabled(browser.tabs.count < 2)
         // ⌘⇧T, and the History menu's Recently Closed, where few think to
@@ -794,11 +831,18 @@ struct TabMenu: View {
 /// One gesture or the other, never the two together.
 struct OneClick: ViewModifier {
     let double: Bool
+    var onSingle: (() -> Void)? = nil
     let act: () -> Void
 
     func body(content: Content) -> some View {
         if double {
-            content.onTapGesture(count: 2, perform: act)
+            if let onSingle {
+                content
+                    .simultaneousGesture(TapGesture(count: 1).onEnded { _ in onSingle() })
+                    .onTapGesture(count: 2, perform: act)
+            } else {
+                content.onTapGesture(count: 2, perform: act)
+            }
         } else {
             content.onTapGesture(perform: act)
         }
@@ -845,6 +889,46 @@ struct MiddleClick: NSViewRepresentable {
             guard pressed else { return }
             pressed = false
             if bounds.contains(convert(event.locationInWindow, from: nil)) { act() }
+        }
+    }
+}
+
+/// The active pin normally answers only a double-click. Give its
+/// Command-click a single, tab-local path without changing that behavior.
+struct CommandTabClick: NSViewRepresentable {
+    let act: (Bool) -> Void
+
+    func makeNSView(context: Context) -> NSView { Catch() }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        (view as? Catch)?.act = act
+    }
+
+    private final class Catch: NSView {
+        var act: (Bool) -> Void = { _ in }
+        private var pressed = false
+        private var extending = false
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard let event = NSApp.currentEvent else { return nil }
+            if pressed && event.type == .leftMouseUp { return super.hitTest(point) }
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard event.type == .leftMouseDown, modifiers.contains(.command),
+                  modifiers.isDisjoint(with: [.option, .control])
+            else { return nil }
+            return super.hitTest(point)
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            pressed = true
+            extending = event.modifierFlags.contains(.shift)
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            guard pressed else { return }
+            pressed = false
+            guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+            act(extending)
         }
     }
 }
