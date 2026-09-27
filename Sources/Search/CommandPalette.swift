@@ -10,6 +10,15 @@ struct CommandPalette: View {
     @State private var hoveredCommandID: String?
     @FocusState private var searchFocused: Bool
 
+    private var spaceCommands: [PaletteCommand] {
+        guard browser.prefs.usesSpaces else { return [] }
+        return browser.spaces.enumerated().map { index, space in
+            let number = index + 1
+            return .init("\(number). \(space.name)", section: "Spaces", shortcut: number <= 9 ? "\(number)" : nil,
+                         keywords: "space \(number)", action: { browser.switchSpace(to: space.id) })
+        }
+    }
+
     private var tabCommands: [PaletteCommand] {
         let tab = browser.active
         let hasPage = tab.map { !$0.isBlank } ?? false
@@ -68,7 +77,7 @@ struct CommandPalette: View {
         ]
     }
 
-    private var commands: [PaletteCommand] { tabCommands + pageCommands + developerCommands + windowCommands }
+    private var commands: [PaletteCommand] { spaceCommands + tabCommands + pageCommands + developerCommands + windowCommands }
 
     private var matches: [PaletteCommand] {
         let words = query.split(whereSeparator: \.isWhitespace).map(String.init)
@@ -113,6 +122,15 @@ struct CommandPalette: View {
                 .focused($searchFocused)
                 .onKeyPress(.downArrow) { moveSelection(1); return .handled }
                 .onKeyPress(.upArrow) { moveSelection(-1); return .handled }
+                .onKeyPress(keys: Set((1...9).map { KeyEquivalent(Character(String($0))) })) { keyPress in
+                    guard keyPress.modifiers.isDisjoint(with: [.command, .control, .option, .shift]),
+                          browser.prefs.usesSpaces,
+                          let number = Int(keyPress.characters),
+                          browser.spaces.indices.contains(number - 1) else { return .ignored }
+                    browser.commandPalette = false
+                    browser.switchSpace(index: number - 1)
+                    return .handled
+                }
                 .onSubmit(runSelected)
             Text("esc")
                 .font(.system(size: 11, design: .monospaced))
