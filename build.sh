@@ -210,6 +210,7 @@ if [ -f "Search.provisionprofile" ]; then
   ENTITLEMENTS="Search.passkeys.entitlements"
   echo "passkeys: profile embedded"
 fi
+xattr -cr "$APP"
 if [ -n "$IDENTITY" ]; then
   codesign --force --deep --timestamp --options runtime \
     --entitlements "$ENTITLEMENTS" \
