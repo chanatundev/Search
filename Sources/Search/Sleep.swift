@@ -61,10 +61,10 @@ extension Browser {
         for tab in idle { self.sleep(tab) }
     }
 
-    /// Immediately put down eligible tabs behind the one on screen, in this
-    /// space. `sleep(_:)` still protects pins, media, calls, downloads and text.
+    /// Immediately put down eligible tabs behind the one(s) on screen, in this
+    /// space. Respects Split View visible panes, pins, media, calls, downloads and text.
     func sleepBackgroundTabs() {
-        putToSleep(tabs.filter { $0.id != activeID }, in: "the current space")
+        putToSleep(tabs.filter { !visibleTabIDs.contains($0.id) }, in: "the current space")
     }
 
     /// Put down every eligible tab in spaces other than the one on screen.
@@ -118,7 +118,7 @@ extension Browser {
     /// Why a tab has to stay awake — nil when nothing keeps it. The clock is
     /// the caller's business; this is everything else.
     func awake(because tab: Tab) -> String? {
-        if tab.id == activeID { return "on screen" }
+        if visibleTabIDs.contains(tab.id) { return "on screen" }
         if tab.pin != nil { return "pinned" }
         if tab.bench { return "a bench tab" }
         if tab.isBlank { return "blank" }
@@ -129,8 +129,17 @@ extension Browser {
         if tab.floating || floating == tab.id { return "its video is out" }
         if web.cameraCaptureState != .none || web.microphoneCaptureState != .none { return "on a call" }
         if downloading.contains(where: { $0.webView === web }) { return "downloading" }
+        if heldDialogs[tab.id]?.isEmpty == false || paneQuestions.contains(where: { $0.tab == tab.id }) {
+            return "a question waiting"
+        }
         // A sign-in window hands its answer back to the page that opened it.
-        if active?.opener == tab.id { return "the page on screen came from it" }
+        if let pair = activeSplit {
+            if tabs.contains(where: { pair.contains($0.id) && $0.opener == tab.id }) {
+                return "the page on screen came from it"
+            }
+        } else if active?.opener == tab.id {
+            return "the page on screen came from it"
+        }
         return nil
     }
 

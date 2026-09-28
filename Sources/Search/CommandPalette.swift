@@ -10,74 +10,175 @@ struct CommandPalette: View {
     @State private var hoveredCommandID: String?
     @FocusState private var searchFocused: Bool
 
+    private static let commandKeywords: [String: String] = [
+        "file.newWindow": "window browser",
+        "file.newTab": "tab",
+        "file.newPrivateTab": "incognito private shy secret",
+        "file.reopen": "undo restore closed tab",
+        "file.openAddress": "url location bar omnibox go",
+        "file.closeTab": "close w",
+        "file.import": "bookmarks passwords history chrome arc brave safari",
+        "file.print": "pdf hardcopy",
+        "edit.find": "search page text in document",
+        "view.sidebar": "left column tab list vertical",
+        "view.fold": "toggle hide collapse sidebar bar",
+        "view.reload": "refresh",
+        "view.reloadOrigin": "hard refresh cache bypass",
+        "view.reader": "article read clean mode",
+        "view.float": "pip picture in picture floating video popup",
+        "view.summarize": "ai summary tl;dr",
+        "view.ask": "ai question explain page",
+        "view.hide": "remove clutter ads blocker cosmetic",
+        "view.hidden": "restore unhide elements rules",
+        "view.zoomIn": "magnify larger text scale",
+        "view.zoomOut": "smaller text scale",
+        "view.actualSize": "reset 100% default scale",
+        "view.inspector": "developer devtools inspect elements",
+        "view.console": "developer js logs devtools error",
+        "view.inspect": "developer pick element devtools",
+        "tabs.split": "side by side dual pane two pages",
+        "tabs.focusLeftPane": "pane left switch",
+        "tabs.focusRightPane": "pane right switch",
+        "tabs.focusOtherPane": "pane switch flip",
+        "tabs.swapSplit": "reorder switch sides",
+        "tabs.separateSplit": "unsplit join detach",
+        "tabs.rename": "title label name",
+        "tabs.duplicate": "clone copy tab",
+        "tabs.copyAddress": "copy url link",
+        "tabs.copyMarkdown": "link format md",
+        "tabs.pasteAndGo": "clipboard open navigate",
+        "tabs.closeOthers": "isolate only keep current",
+        "tabs.mute": "silence sound audio pause",
+        "bookmarks.add": "favorite star save",
+        "bookmarks.show": "favorites list library",
+        "bookmarks.bar": "shelf favorites row",
+        "history.show": "recent visited sites library",
+        "history.downloads": "files transfers loot fetched",
+        "history.clearData": "cache cookies remove erase reset",
+        "history.clear": "erase recent visits",
+        "app.settings": "preferences config options",
+        "app.passwords": "logins credentials keychain vault",
+    ]
+
     private var spaceCommands: [PaletteCommand] {
         guard browser.prefs.usesSpaces else { return [] }
         return browser.spaces.enumerated().map { index, space in
             let number = index + 1
-            return .init("\(number). \(space.name)", section: "Spaces", shortcut: number <= 9 ? "\(number)" : nil,
-                         keywords: "space \(number)", action: { browser.switchSpace(to: space.id) })
+            return .init(
+                "\(number). \(space.name)",
+                section: "Spaces",
+                shortcut: number <= 9 ? "\(number)" : nil,
+                keywords: "space \(number) switch workspace",
+                action: { browser.switchSpace(to: space.id) }
+            )
         }
     }
 
-    private var tabCommands: [PaletteCommand] {
-        let tab = browser.active
-        let hasPage = tab.map { !$0.isBlank } ?? false
-        return [
-            .init("New Tab", section: "Tabs", shortcut: "⌘T", action: { browser.newTab() }),
-            .init("New Private Tab", section: "Tabs", shortcut: "⇧⌘N", keywords: "incognito private", action: { browser.newShyTab() }),
-            .init("Reopen Closed Tab", section: "Tabs", shortcut: "⇧⌘T", enabled: !browser.ghosts.isEmpty, action: { browser.reopen() }),
-            .init("Close Tab", section: "Tabs", shortcut: "⌘W", enabled: tab != nil, action: { if let tab = browser.active { browser.close(tab) } }),
-            .init(tab?.pin == nil ? "Pin Tab" : "Unpin Tab", section: "Tabs", keywords: "pin", enabled: hasPage, action: {
-                if let tab = browser.active {
-                    if tab.pin == nil { browser.pin(tab) } else { browser.unpin(tab) }
-                }
-            }),
-            .init("Rename Tab", section: "Tabs", keywords: "name title", enabled: tab != nil, action: { if let tab = browser.active { browser.beginTabRename(tab) } }),
-            .init("Duplicate Tab", section: "Tabs", shortcut: "⌘D", enabled: hasPage, action: { browser.duplicate() }),
-            .init("Copy Address", section: "Tabs", shortcut: "⇧⌘C", keywords: "url link", enabled: hasPage, action: { browser.copyAddress() }),
-            .init("Copy as Markdown Link", section: "Tabs", keywords: "url markdown link", enabled: hasPage, action: { browser.copyMarkdownLink() }),
-            .init("Paste and Go", section: "Tabs", shortcut: "⇧⌘V", keywords: "clipboard address url", action: { browser.pasteAndGo() }),
-            .init("Close Other Tabs", section: "Tabs", enabled: browser.tabs.count > 1, action: { if let tab = browser.active { browser.closeOthers(but: tab) } }),
-            .init("Stop Sound in Tab", section: "Tabs", shortcut: "⇧⌘M", keywords: "mute pause audio", enabled: tab != nil, action: { browser.pauseMedia() }),
-            .init("Sleep Background Tabs", section: "Tabs", note: "Current space · tabs other than the one in front", keywords: "memory inactive", action: { browser.sleepBackgroundTabs() }),
-            .init("Sleep Background Spaces", section: "Tabs", note: browser.prefs.usesSpaces ? "Tabs parked in other spaces" : "Turn on Spaces in Settings first", keywords: "memory parked", enabled: browser.prefs.usesSpaces, action: { browser.sleepBackgroundSpaces() }),
-        ]
+    private var menuCommands: [PaletteCommand] {
+        let active = browser.active
+        let hasPage = active.map { !$0.isBlank } ?? false
+        let hasSplit = active.flatMap { browser.split(for: $0) } != nil
+
+        return Command.all.compactMap { command in
+            // Skip palette trigger itself
+            guard command.id != "app.palette" else { return nil }
+            // Filter split commands if split view disabled
+            if Command.split.contains(command.id), !browser.prefs.splitView { return nil }
+            // Filter AI commands if AI disabled
+            if Command.ai.contains(command.id), !browser.prefs.ai { return nil }
+
+            let shortcut = ShortcutStore.shared.key(for: command.id)?.display
+
+            let enabled: Bool
+            switch command.id {
+            case "file.reopen": enabled = !browser.ghosts.isEmpty
+            case "file.closeTab": enabled = active != nil
+            case "file.share", "file.print": enabled = hasPage
+            case "edit.find", "edit.findNext", "edit.findPrevious": enabled = hasPage
+            case "view.reload", "view.reloadOrigin", "view.reader", "view.float": enabled = hasPage
+            case "view.summarize", "view.ask", "view.hide": enabled = hasPage
+            case "view.hidden": enabled = browser.hereHost != nil
+            case "view.zoomIn", "view.zoomOut", "view.actualSize": enabled = hasPage
+            case "view.inspector", "view.console", "view.inspect": enabled = hasPage
+            case "tabs.next", "tabs.previous": enabled = browser.tabs.count > 1
+            case "tabs.split": enabled = hasPage && !hasSplit
+            case "tabs.focusLeftPane", "tabs.focusRightPane", "tabs.focusOtherPane", "tabs.swapSplit", "tabs.separateSplit":
+                enabled = hasSplit
+            case "tabs.rename": enabled = active != nil
+            case "tabs.duplicate": enabled = hasPage
+            case "tabs.copyAddress": enabled = !browser.tabsWithAddressesToCopy.isEmpty
+            case "tabs.copyMarkdown": enabled = hasPage
+            case "tabs.closeOthers": enabled = browser.tabs.count > 1
+            case "tabs.mute": enabled = active != nil
+            case "bookmarks.add": enabled = hasPage
+            default: enabled = true
+            }
+
+            let keywords = Self.commandKeywords[command.id] ?? ""
+
+            return PaletteCommand(
+                command.title,
+                section: command.section.rawValue,
+                shortcut: shortcut,
+                keywords: keywords,
+                enabled: enabled
+            ) {
+                command.run(browser)
+            }
+        }
     }
 
-    private var pageCommands: [PaletteCommand] {
-        let hasPage = browser.active.map { !$0.isBlank } ?? false
-        return [
-            .init("Reload Page", section: "Page", shortcut: "⌘R", keywords: "refresh", enabled: hasPage, action: { browser.reload() }),
-            .init("Reading Mode", section: "Page", shortcut: "⇧⌘R", keywords: "reader article", enabled: hasPage, action: { browser.toggleReader() }),
-            .init("Float Video", section: "Page", shortcut: "⇧⌘P", keywords: "picture in picture pip", enabled: hasPage, action: { browser.toggleFloat() }),
-            .init("Hide Elements…", section: "Page", shortcut: "⇧⌘H", keywords: "remove clutter ads", enabled: hasPage, action: { browser.toggleHiding() }),
-            .init("Hidden on This Site…", section: "Page", shortcut: "⇧⌘U", keywords: "restore elements", enabled: browser.hereHost != nil, action: { browser.reviewing.toggle() }),
-            .init("Zoom In", section: "Page", shortcut: "⌘+", keywords: "larger", enabled: hasPage, action: { browser.zoom(by: 1.1) }),
-            .init("Zoom Out", section: "Page", shortcut: "⌘-", keywords: "smaller", enabled: hasPage, action: { browser.zoom(by: 1 / 1.1) }),
-            .init("Actual Size", section: "Page", shortcut: "⌘0", keywords: "reset zoom", enabled: hasPage, action: { browser.resetZoom() }),
-        ]
-    }
-
-    private var developerCommands: [PaletteCommand] {
-        let hasPage = browser.active.map { !$0.isBlank } ?? false
-        return [
-            .init("Web Inspector", section: "Developer", shortcut: "⌥⌘I", keywords: "developer tools", enabled: hasPage, action: { browser.toggleInspector() }),
-            .init("JavaScript Console", section: "Developer", shortcut: "⌥⌘J", keywords: "developer tools", enabled: hasPage, action: { browser.showConsole() }),
-            .init("Inspect Element", section: "Developer", shortcut: "⌥⌘C", keywords: "developer tools pick", enabled: hasPage, action: { browser.inspectElement() }),
-        ]
-    }
-
-    private var windowCommands: [PaletteCommand] {
+    private var extraCommands: [PaletteCommand] {
+        let active = browser.active
+        let hasPage = active.map { !$0.isBlank } ?? false
         let isFullscreen = NSApp.keyWindow?.styleMask.contains(.fullScreen) ?? false
-        return [
-            .init(isFullscreen ? "Exit Full Screen" : "Enter Full Screen", section: "Window", shortcut: "⌃⌘F", keywords: "enter exit fullscreen", action: { NSApp.keyWindow?.toggleFullScreen(nil) }),
-            .init("Open Settings", section: "Browser", shortcut: "⌘,", keywords: "preferences", action: { browser.tuning = true }),
-            .init("Open History", section: "Browser", shortcut: "⌘Y", keywords: "recently visited", action: { browser.recalling = true }),
-            .init("Open Downloads", section: "Browser", shortcut: "⇧⌘J", keywords: "download files", action: { browser.hoarding = true }),
-        ]
+
+        var extras: [PaletteCommand] = []
+
+        if let active {
+            extras.append(.init(
+                active.pin == nil ? "Pin Tab" : "Unpin Tab",
+                section: "Tabs",
+                keywords: "pin unpin anchor",
+                enabled: hasPage,
+                action: {
+                    if active.pin == nil { browser.pin(active) } else { browser.unpin(active) }
+                }
+            ))
+        }
+
+        extras.append(.init(
+            "Sleep Background Tabs",
+            section: "Tabs",
+            note: "Current space · tabs other than the one in front",
+            keywords: "memory inactive hibernate suspend sleep",
+            enabled: browser.tabs.count > 1,
+            action: { browser.sleepBackgroundTabs() }
+        ))
+
+        extras.append(.init(
+            "Sleep Background Spaces",
+            section: "Tabs",
+            note: browser.prefs.usesSpaces ? "Tabs parked in other spaces" : "Turn on Spaces in Settings first",
+            keywords: "memory parked hibernate suspend sleep",
+            enabled: browser.prefs.usesSpaces,
+            action: { browser.sleepBackgroundSpaces() }
+        ))
+
+        extras.append(.init(
+            isFullscreen ? "Exit Full Screen" : "Enter Full Screen",
+            section: "Window",
+            shortcut: "⌃⌘F",
+            keywords: "enter exit fullscreen window",
+            action: { NSApp.keyWindow?.toggleFullScreen(nil) }
+        ))
+
+        return extras
     }
 
-    private var commands: [PaletteCommand] { spaceCommands + tabCommands + pageCommands + developerCommands + windowCommands }
+    private var commands: [PaletteCommand] {
+        spaceCommands + menuCommands + extraCommands
+    }
 
     private var matches: [PaletteCommand] {
         let words = query.split(whereSeparator: \.isWhitespace).map(String.init)
