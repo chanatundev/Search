@@ -37,6 +37,8 @@
     ./bench ext-shot ID PATH           a picture of its popup while it is open
     ./bench ext-answer yes|no|ask      test run: answer extensions' questions without asking; lists what was asked
     ./bench ext-enable ID on|off       switch an extension on or off
+    ./bench capture                    extensions' screen recording: ids given, what records, who may, last request
+    ./bench capture-stop ID            stop what an extension is recording, as the pill's Stop does
     ./bench ext-remove ID
     ./bench strip PATH [WIDTH]         the row of tabs across the top, drawn off screen to a PNG
     ./bench column PATH [HEIGHT]       the column of tabs, drawn off screen to a PNG
@@ -44,6 +46,8 @@
                                        world's own account — whether it is there, before and after
     ./bench fold PATH [WIDTH]          test run: the folded strip or column out over the page (ui folded on,
                                        ui peek on), drawn off screen over red — red shows where the page would
+    ./bench sitesearch [state|tab|delete|esc|go|learn PAGE DESCRIPTION|forget]
+                                       test run only: search a site from the address field
     ./bench split state|start|pair|focus|select|detach|fraction|close|new-tab|move|drop|open|private|bench|sleep|reopen|insert|save|space|mouse
                                        test run only: exercise split state in the real browser model
     ./bench space [new NAME [fresh]|go N|delete|swipe DX|hold DX|release|move N]
@@ -55,9 +59,9 @@
                                        and whether a drag from there would move the window;
                                        double: test run, a double-click there (start the probe hidden)
     ./bench place ID INDEX             put a tab at another place in the row
-    ./bench group [ID new [NAME] | ID NAME | ID none | fold NAME]
+    ./bench group [ID new [NAME] | ID NAME | ID none | fold NAME | close NAME]
                                        test run: the tab groups; a tab into a new group, into one by name,
-                                       or out of its group; a group folded or opened
+                                       or out of its group; a group folded or opened, or closed with its tabs
     ./bench tospace ID N               test run: Move to Space, the tab to the Nth space
     ./bench field TEXT [type] [go]     test run: TEXT pasted into the address field (type: a key at a time),
                                        each timed until the window has caught up; go: then Return, timed
@@ -77,6 +81,9 @@
     ./bench import-preview           test run: each browser found, its profiles, the one used most recently, and what
                                      it holds as the Bring things over sheet counts it — without asking for a key
     ./bench import-file PATH         test run: a bookmarks .html, a passwords .csv or Safari's export .zip, as File… brings it
+    ./bench import-file-start PATH   test run: start file import without waiting for completion
+    ./bench import-file-status       test run: current filename, stage, counts and cancellation state
+    ./bench import-file-cancel       test run: request cancellation of the current file import
     ./bench menu [open]                test run: the Bookmarks menu as it is about to open, and its first
                                        folder (open: its first bookmark picked)
     ./bench bookmark URL [new]         test run: a bookmark picked from the list, timed until it loads
@@ -204,6 +211,10 @@ def main(argv):
         request["id"] = args[0]
         if len(args) > 1: request["path"] = os.path.abspath(args[1])
         if len(args) > 2: request["width"] = float(args[2])
+    elif verb == "sitesearch":
+        request["action"] = args[0] if args else "state"
+        if len(args) == 3 and args[0] == "learn":
+            request["page"], request["description"] = args[1], args[2]
     elif verb == "ui":
         if len(args) != 2: sys.exit("usage: bench ui KEY VALUE")
         key, value = args
@@ -213,6 +224,11 @@ def main(argv):
         if len(args) != 1: sys.exit(f"usage: bench {verb} ID")
         request["id"] = args[0]
         request["yes"] = yes
+    elif verb == "capture":
+        pass
+    elif verb == "capture-stop":
+        if len(args) != 1: sys.exit("usage: bench capture-stop ID")
+        request["id"] = args[0]
     elif verb == "ext-enable":
         if len(args) != 2: sys.exit("usage: bench ext-enable ID on|off")
         request["id"] = args[0]
@@ -353,9 +369,10 @@ def main(argv):
         request["id"], request["to"] = args[0], int(args[1])
     elif verb == "group":
         if args and args[0] == "fold" and len(args) == 2: request["fold"], request["name"] = True, args[1]
+        elif args and args[0] == "close" and len(args) == 2: request["close"], request["name"] = True, args[1]
         elif len(args) >= 2 and args[1] == "new": request["id"], request["new"], request["name"] = args[0], True, " ".join(args[2:])
         elif len(args) >= 2: request["id"], request["name"] = args[0], " ".join(args[1:])
-        elif args: sys.exit("usage: bench group [ID new [NAME] | ID NAME | ID none | fold NAME]")
+        elif args: sys.exit("usage: bench group [ID new [NAME] | ID NAME | ID none | fold NAME | close NAME]")
     elif verb == "tospace":
         if len(args) != 2: sys.exit("usage: bench tospace ID N")
         request["id"], request["index"] = args[0], int(args[1])
@@ -381,9 +398,11 @@ def main(argv):
         if not args or any(a not in kinds for a in args[1:]): sys.exit("usage: bench import BROWSER [bookmarks] [history] [passwords] [spaces] [--profile NAME|all]")
         request["from"] = args[0]
         request["what"] = args[1:]
-    elif verb == "import-file":
-        if len(args) != 1: sys.exit("usage: bench import-file PATH")
+    elif verb in ("import-file", "import-file-start"):
+        if len(args) != 1: sys.exit(f"usage: bench {verb} PATH")
         request["path"] = os.path.abspath(args[0])
+    elif verb in ("import-file-status", "import-file-cancel"):
+        if args: sys.exit(f"usage: bench {verb}")
     elif verb == "menu":
         if args not in ([], ["open"]): sys.exit("usage: bench menu [open]")
         request["open"] = args == ["open"]
@@ -491,6 +510,8 @@ def main(argv):
     elif verb == "answer":
         if args not in (["once"], ["always"], ["no"]): sys.exit("usage: bench answer once|always|no")
         request["with"] = args[0]
+    elif verb == "notifications":
+        pass
     elif verb == "accounts":
         if len(args) not in (0, 1) or (args and not args[0].isdigit()): sys.exit("usage: bench accounts [ROW]")
         if args: request["pick"] = int(args[0])

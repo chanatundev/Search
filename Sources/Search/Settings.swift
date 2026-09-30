@@ -430,12 +430,26 @@ struct SettingsPanel: View {
                 Switch(on: $prefs.lazyTabs)
             }
             Rule()
+            Line("Search a site from the address field", "Type the start of a site's name, like red or yout, then Tab, and what you type next searches that site. Sites you visit that offer a search join the list.") {
+                Switch(on: $prefs.searchesSites)
+            }
+            Rule()
+            Line("Start with a fresh window", "Each time Search opens, your pinned tabs are there and last time's other tabs aren't.") {
+                Switch(on: $prefs.startsFresh)
+            }
+            Rule()
             Line("Spaces", "Separate sets of tabs, signed in where the others are or starting afresh, switched with ⌃1–⌃9, two fingers sideways over the column, or the space's icon. Mission Control's own ⌃1–⌃9, if you turned them on, take those keys first.") {
                 Switch(on: $prefs.usesSpaces)
             }
             Rule()
             Line("Tab groups", "Named sections in the sidebar. Right-click a tab to start a group; click its heading to hide or show its tabs.") {
                 Switch(on: $prefs.usesTabGroups)
+            }
+            if prefs.sidebar {
+                Rule()
+                Line("Pinned rows", "As in Arc: pins as squares for the sites you live in, pins as rows under them for pages you keep, and a line over the rest with Clear. Right-click a tab to pin it as a row.") {
+                    Switch(on: $prefs.listsPins)
+                }
             }
             Rule()
             Line("Split View", "Show two tabs side by side. Drag a tab onto a page to pair them.") {
@@ -552,9 +566,14 @@ struct SettingsPanel: View {
                     Switch(on: Binding(get: { !prefs.keepsSignIns }, set: { prefs.keepsSignIns = !$0 }))
                 }
                 Rule()
-                Line("Camera, microphone and location", "What each site was allowed or refused") {
+                Line("Camera, microphone, location and notifications", "What each site was allowed or refused, and the sites whose videos don't float") {
                     Pill("Forget choices") { browser.forgetCaptureChoices() }
                 }
+                Rule()
+                Line("Let sites ask to send notifications", "A site asks on a card over its page, and only one you allow reaches your Mac's notifications. Private tabs are never asked") {
+                    Switch(on: $prefs.siteNotifications)
+                }
+                NotificationSites()
             }
             Card {
                 Line("History", "Every address you have been to") {
@@ -872,5 +891,23 @@ struct Pill: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(Motion.quick, value: hovering)
+    }
+}
+
+/// Settings › Privacy: the sites allowed to send notifications, each with a
+/// way to take it back.
+private struct NotificationSites: View {
+    @ObservedObject private var notifications = SiteNotifications.shared
+
+    var body: some View {
+        let sites = SiteNotifications.allowed
+        if !sites.isEmpty {
+            ForEach(sites, id: \.self) { site in
+                Rule()
+                Line(URL(string: site).map(SiteCard.site) ?? site, "Can send notifications") {
+                    Pill("Remove") { SiteNotifications.forget(site) }
+                }
+            }
+        }
     }
 }

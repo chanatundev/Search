@@ -106,8 +106,25 @@ final class Preferences: ObservableObject {
     /// of links from another app — waits to load until it is gone to, as a
     /// tab brought back from the last session does (see Browser.open).
     /// Off unless asked for.
+    /// Settings › Privacy › Let sites ask to send notifications. On: a site
+    /// asks on a card, and only what you allow ever reaches the Mac.
+    @Published var siteNotifications: Bool {
+        didSet { store.set(siteNotifications, forKey: "notifications.ask") }
+    }
     @Published var lazyTabs: Bool {
         didSet { store.set(lazyTabs, forKey: "tabs.lazy") }
+    }
+    /// Each launch starts with a fresh window: the pins stay, last time's
+    /// other tabs don't come back (see Session.startFresh). Off unless
+    /// asked for (#406).
+    @Published var startsFresh: Bool {
+        didSet { store.set(startsFresh, forKey: Preferences.freshKey) }
+    }
+    nonisolated static let freshKey = "start.fresh"
+    /// Search a site from the address field: the start of its name, then
+    /// Tab (see SiteSearch.swift). Off unless asked for.
+    @Published var searchesSites: Bool {
+        didSet { store.set(searchesSites, forKey: "search.sites") }
     }
     @Published var showsReading: Bool {
         didSet { store.set(showsReading, forKey: "tabs.reading") }
@@ -284,6 +301,15 @@ final class Preferences: ObservableObject {
     @Published var usesTabGroups: Bool {
         didSet { store.set(usesTabGroups, forKey: "tabs.groups") }
     }
+    /// Arc's three tiers in the sidebar: the squares, pins kept as rows
+    /// under them, and a line with Clear above the tabs that come and go
+    /// (see Tab.listed). Off unless asked for.
+    @Published var listsPins: Bool {
+        didSet { store.set(listsPins, forKey: "pins.list") }
+    }
+    /// Whether the pinned rows are drawn as rows: asked for, and with the
+    /// tabs down the side. Across the top every pin is a square.
+    var showsPinRows: Bool { listsPins && sidebar }
     /// The AI add-on: summaries of the page and questions about it (see
     /// AIAssist). Off unless asked for; nothing is sent until you ask.
     @Published var ai: Bool {
@@ -357,6 +383,9 @@ final class Preferences: ObservableObject {
             .flatMap { try? JSONDecoder().decode([Keyword].self, from: $0) } ?? []
         sleepsTabs = store.object(forKey: "tabs.sleep") as? Bool ?? true
         lazyTabs = store.bool(forKey: "tabs.lazy")
+        startsFresh = store.bool(forKey: Preferences.freshKey)
+        searchesSites = store.bool(forKey: "search.sites")
+        siteNotifications = store.object(forKey: "notifications.ask") as? Bool ?? true
         showsReading = store.object(forKey: "tabs.reading") as? Bool ?? true
         shielded = store.object(forKey: "shield") as? Bool ?? true
         let keeps = store.bool(forKey: "sites.keep")
@@ -395,6 +424,7 @@ final class Preferences: ObservableObject {
         welcomed = store.bool(forKey: "welcomed") || store.object(forKey: "glyph") != nil
         usesSpaces = store.bool(forKey: "spaces")
         usesTabGroups = store.bool(forKey: "tabs.groups")
+        listsPins = store.bool(forKey: "pins.list")
         splitView = store.bool(forKey: "splitView")
         ai = store.bool(forKey: "ai")
         aiProvider = store.string(forKey: "ai.provider").flatMap(AIProvider.init(rawValue:))

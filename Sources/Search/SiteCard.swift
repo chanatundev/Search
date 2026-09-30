@@ -6,10 +6,11 @@ import SwiftUI
 // The site card: what a click on the tab you are on shows under its address,
 // in the column and in the bar across the top alike — whether the connection
 // is private, and the few things that belong to the page (copy its address,
-// print it, its zoom, whether it may play sound by itself). Right-click ›
-// Site Information… opens the same. It goes as soon as you type, when the
-// address is left, or when one of its lines is used. From #56, whose bar it came with; the bar itself stayed out,
-// since Search has the column or the strip, never a second row over the page.
+// print it, its zoom, whether it may play sound by itself, whether its videos
+// float out). Right-click › Site Information… opens the same. It goes as soon
+// as you type, when the address is left, or when one of its lines is used.
+// From #56, whose bar it came with; the bar itself stayed out, since Search
+// has the column or the strip, never a second row over the page.
 
 /// The card's own small window, under the tab's address. It never takes the
 /// keys: the address stays in the tab being edited, the caret where it was,
@@ -101,21 +102,29 @@ enum SiteCardPanel {
         panel.hasShadow = true
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = true
-        // Under the address, lined up with the tab's own edge.
+        // Under the address, lined up with the tab's own edge — or over it,
+        // for a tab too near the bottom of the screen to have the room. Only
+        // ever beside the field: pushed up onto it, the card covered the
+        // address being edited, and what was typed there with it.
         let spot = window.convertToScreen(field.convert(field.bounds, to: nil))
         var origin = NSPoint(x: spot.minX - 12, y: spot.minY - 12 - size.height)
+        var above = false
         if let screen = window.screen?.visibleFrame {
             origin.x = min(max(origin.x, screen.minX + 8), screen.maxX - size.width - 8)
-            origin.y = max(origin.y, screen.minY + 8)
+            if origin.y < screen.minY + 8 {
+                above = true
+                origin.y = min(spot.maxY + 12, screen.maxY - size.height - 8)
+            }
         }
         panel.setFrameOrigin(origin)
         window.addChildWindow(panel, ordered: .above)
-        // Its size follows the card, keeping the top edge under the address.
+        // Its size follows the card, keeping the edge nearest the address
+        // where it is.
         host.onResize = { [weak panel] fitted in
             guard let panel, fitted.width > 0, fitted.height > 0,
                   panel.frame.size != fitted else { return }
             var frame = panel.frame
-            frame.origin.y += frame.height - fitted.height
+            if !above { frame.origin.y += frame.height - fitted.height }
             frame.size = fitted
             panel.setFrame(frame, display: true)
         }
@@ -218,6 +227,18 @@ struct SiteCard: View {
             Row("Print…", keys: "⌘P") { after { browser.printPage() } }
             zoom
             sound
+            grounded
+        }
+    }
+
+    /// Whether the site's videos float out on their own (see Grounded).
+    /// Only on a site they would float from, with one of Settings › General's
+    /// Float the video switches on, and not in a private tab.
+    @ViewBuilder private var grounded: some View {
+        if !tab.shy, browser.prefs.floatsOnLeave || browser.prefs.floatsAway,
+           let url = tab.pageAddress, ["http", "https"].contains(url.scheme?.lowercased()),
+           Players.knows(url), let host = url.host() {
+            Ground(host: host)
         }
     }
 
@@ -292,6 +313,33 @@ struct SiteCard: View {
             .padding(.trailing, MenuMetrics.trailing)
             .frame(height: MenuMetrics.row)
             .onChange(of: on) { _, value in Autoplay.set(value, for: host) }
+        }
+    }
+
+    /// Its line. Asked each time a video would float, so it holds at once,
+    /// for the page already open too.
+    private struct Ground: View {
+        let host: String
+        @State private var on: Bool
+
+        init(host: String) {
+            self.host = host
+            _on = State(initialValue: Grounded.holds(host))
+        }
+
+        var body: some View {
+            HStack(spacing: 0) {
+                Text("Don't Float Videos Here")
+                    .font(MenuMetrics.font)
+                    .foregroundStyle(Color(nsColor: .labelColor))
+                    .fixedSize()
+                Spacer(minLength: 24)
+                Switch(on: $on)
+            }
+            .padding(.leading, MenuMetrics.text)
+            .padding(.trailing, MenuMetrics.trailing)
+            .frame(height: MenuMetrics.row)
+            .onChange(of: on) { _, value in Grounded.set(value, for: host) }
         }
     }
 

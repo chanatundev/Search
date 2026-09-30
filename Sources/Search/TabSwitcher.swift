@@ -16,6 +16,39 @@ final class TabSwitcher: ObservableObject {
     @Published private(set) var visible = false
     @Published private var previews: [Tab.ID: (address: URL, image: NSImage)] = [:]
 
+    /// A pair's other page, by its first: the pair is one card, with both
+    /// pages pictured side by side (see Browser.switchTabs).
+    var partners: [Tab.ID: Tab.ID] = [:]
+
+    /// Where the panel and each card are in the window, for the pointer to be
+    /// matched against (see `hover(at:)` and Browser.clickTabSwitcher). From
+    /// #358, by oddharsh.
+    var panelFrame: CGRect = .zero
+    var cardFrames: [Tab.ID: CGRect] = [:]
+    /// Where the pointer was when the panel first felt it, and whether it has
+    /// gone anywhere since.
+    private var rest: CGPoint?
+    private var moved = false
+
+    /// The pointer over the panel picks the card under it, once it has moved.
+    /// The panel comes up wherever the pointer happens to be, and a card that
+    /// lands under a still pointer would otherwise take the pick from the keys
+    /// before anyone reached for the mouse.
+    func hover(at point: CGPoint) {
+        guard visible else { return }
+        if !moved {
+            guard let rest else { return self.rest = point }
+            guard abs(point.x - rest.x) + abs(point.y - rest.y) > 2 else { return }
+            moved = true
+        }
+        if let id = card(at: point), id != selectedID { selectedID = id }
+    }
+
+    /// The card at a point in the window, if any.
+    func card(at point: CGPoint) -> Tab.ID? {
+        cardFrames.first { $0.value.contains(point) && candidates.contains($0.key) }?.key
+    }
+
     private var previewRequests: [Tab.ID: UUID] = [:]
     private var reveal: DispatchWorkItem?
     private var previewRequested = false
@@ -91,6 +124,10 @@ final class TabSwitcher: ObservableObject {
         candidates = []
         selectedID = nil
         visible = false
+        panelFrame = .zero
+        cardFrames = [:]
+        rest = nil
+        moved = false
         prune { kept($0) }
         previewRequested = false
     }
@@ -122,7 +159,8 @@ final class TabSwitcher: ObservableObject {
     }
 
     func cachePreview(_ image: NSImage, for id: Tab.ID, address: URL) {
-        guard kept(id) || (visible && candidates.contains(id)) else { return }
+        let shown = candidates.contains(id) || candidates.contains { partners[$0] == id }
+        guard kept(id) || (visible && shown) else { return }
         previews[id] = (address, image)
     }
 
@@ -130,7 +168,8 @@ final class TabSwitcher: ObservableObject {
         guard visible, !previewRequested else { return }
         previewRequested = true
         let token = generation
-        let orderedIDs = [selectedID].compactMap { $0 } + candidates.filter { $0 != selectedID }
+        let firsts = [selectedID].compactMap { $0 } + candidates.filter { $0 != selectedID }
+        let orderedIDs = firsts.flatMap { id in [id] + [partners[id]].compactMap { $0 } }
         let ordered = orderedIDs.compactMap { id in tabs.first { $0.id == id } }
             .filter { $0.id == current || preview(for: $0.id, address: $0.address) == nil }
         for (index, tab) in ordered.enumerated() {
@@ -161,7 +200,8 @@ final class TabSwitcher: ObservableObject {
         guard active, !visible else { return }
         reveal?.cancel()
         reveal = nil
-        previews = previews.filter { candidates.contains($0.key) }
+        let seconds = Set(candidates.compactMap { partners[$0] })
+        previews = previews.filter { key, _ in candidates.contains(key) || seconds.contains(key) }
         visible = true
     }
 }
@@ -211,6 +251,18 @@ struct TabSwitcherOverlay: View {
                     .padding(12)
                     .background(Palette.ground, in: RoundedRectangle(cornerRadius: 12))
                     .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Palette.hairline))
+                    .background(GeometryReader { box in
+                        Color.clear.preference(key: PanelFrame.self, value: box.frame(in: .global))
+                    })
+                    .onPreferenceChange(PanelFrame.self) { frame in
+                        MainActor.assumeIsolated { switcher.panelFrame = frame }
+                    }
+                    .onPreferenceChange(CardFrames.self) { frames in
+                        MainActor.assumeIsolated { switcher.cardFrames = frames }
+                    }
+                    .onContinuousHover(coordinateSpace: .global) { phase in
+                        if case .active(let point) = phase { switcher.hover(at: point) }
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -222,19 +274,50 @@ struct TabSwitcherOverlay: View {
         }
     }
 
+    /// Where the panel is, and each card by its tab, in the window's own
+    /// top-left coordinates, the ones a click is turned into.
+    private struct PanelFrame: PreferenceKey {
+        static let defaultValue: CGRect = .zero
+        static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+            let next = nextValue()
+            if next != .zero { value = next }
+        }
+    }
+
+    private struct CardFrames: PreferenceKey {
+        static let defaultValue: [Tab.ID: CGRect] = [:]
+        static func reduce(value: inout [Tab.ID: CGRect], nextValue: () -> [Tab.ID: CGRect]) {
+            value.merge(nextValue()) { $1 }
+        }
+    }
+
+    private func picture(_ tab: Tab, width: CGFloat, height: CGFloat) -> some View {
+        ZStack {
+            Palette.hover
+            if let preview = switcher.preview(for: tab.id, address: tab.address) {
+                Image(nsImage: preview)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: width, height: height)
+                    .clipped()
+            } else {
+                Mark(icon: browser.prefs.glyph == .icons ? tab.icon : nil, letter: tab.monogram, size: 26)
+            }
+        }
+        .frame(width: width, height: height)
+    }
+
     private func card(_ tab: Tab, width: CGFloat, previewHeight: CGFloat, height: CGFloat) -> some View {
-        Button { browser.commitTabSwitch(picking: tab.id) } label: {
+        let partner: Tab? = switcher.partners[tab.id].flatMap { id in browser.tabs.first { $0.id == id } }
+        let caption: String = partner.map { tab.label + " · " + $0.label } ?? tab.label
+        let side: CGFloat = partner == nil ? width - 16 : (width - 18) / 2
+        return Button { browser.commitTabSwitch(picking: tab.id) } label: {
             VStack(spacing: 7) {
-                ZStack {
-                    Palette.hover
-                    if let preview = switcher.preview(for: tab.id, address: tab.address) {
-                        Image(nsImage: preview)
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: width - 16, height: previewHeight)
-                            .clipped()
-                    } else {
-                        Mark(icon: browser.prefs.glyph == .icons ? tab.icon : nil, letter: tab.monogram, size: 26)
+                // A pair: its two pages side by side, as on screen.
+                HStack(spacing: 2) {
+                    picture(tab, width: side, height: previewHeight)
+                    if let partner {
+                        picture(partner, width: side, height: previewHeight)
                     }
                 }
                 .frame(width: width - 16, height: previewHeight)
@@ -244,7 +327,7 @@ struct TabSwitcherOverlay: View {
                     if browser.prefs.glyph == .icons, !tab.isBlank {
                         Mark(icon: tab.icon, letter: tab.monogram, size: 13)
                     }
-                    Text(tab.label)
+                    Text(caption)
                         .font(.system(size: 11.5))
                         .foregroundStyle(Palette.ink)
                         .lineLimit(1)
@@ -256,6 +339,9 @@ struct TabSwitcherOverlay: View {
             .contentShape(RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
+        .background(GeometryReader { box in
+            Color.clear.preference(key: CardFrames.self, value: [tab.id: box.frame(in: .global)])
+        })
         .accessibilityLabel("Switch to \(tab.label)")
         .accessibilityValue(tab.id == switcher.selectedID ? "Selected" : "")
     }

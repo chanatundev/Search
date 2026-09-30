@@ -281,6 +281,10 @@ enum ExtensionShims {
       // any more. Made fixed accessors, they can't be taken away, and code
       // that assigns its own polyfill to them still can.
       for (const key of ["browser", "chrome"]) {
+        // SingleFile installs its own browser getter with __defineGetter__.
+        // Keep chrome fixed for WebKit's listeners, but leave browser open
+        // for that getter to replace it without killing the worker.
+        if (key === "browser" && root.chrome?.runtime?.id === "mpiodijhokgodhhofbcjdecpffjipkle") continue;
         const d = Object.getOwnPropertyDescriptor(root, key);
         if (!d || !d.configurable) continue;
         let value = root[key];
@@ -390,6 +394,10 @@ enum ExtensionShims {
         try { return chrome.extension && typeof chrome.extension.getBackgroundPage === "function" && chrome.extension.getBackgroundPage() === root; }
         catch (e) { return false; }
       })());
+      const manifest = (() => { try { return runtime.getManifest(); } catch (e) { return {}; } })();
+      const backgroundPage = manifest.background || {};
+      const hasWorker = !!(backgroundPage.service_worker || backgroundPage.scripts || backgroundPage.page);
+      const offscreenCapable = [...(manifest.permissions || []), ...(manifest.optional_permissions || [])].includes("offscreen");
       // A script a worker imports that isn't there: Chrome throws at once.
       // WebKit goes looking for it first, and while it does, runs the
       // promises already waiting — code that notes "still starting" until
@@ -838,16 +846,26 @@ enum ExtensionShims {
         if (!event || typeof event.addListener !== "function") return;
         const add = event.addListener.bind(event);
         const remove = event.removeListener.bind(event);
+        const internalMessages = event === runtime.onMessage;
+        const relayHost = internalMessages && offscreenCapable && !hasWorker;
         const listeners = new Set();
         let attached = false;
-        const dispatch = function (message, sender, respond) {
-          if (!background && !relaying && fromOwnPages(sender)) {
+        const dispatch = function (message, sender, respond, local = false) {
+          if (!local && !background && !relaying && fromOwnPages(sender)) {
             const k = relayKey(message);
             if (k && pending(heardRelayed, k)) { count(heardRelayed, k, -1); return; }
             if (k) count(heardNatively, k, 1);
           }
           let settled = false, keep = false;
           const sendResponse = (value) => { if (!settled) { settled = true; respond(value); } };
+          // WebKit excludes the sender's whole page from runtime delivery,
+          // so an offscreen iframe cannot reach its parent directly. Another
+          // context of the same extension carries that delivery to the browser.
+          if (!local && message && message.__searchOffscreenRelay === true && sender.id === runtime.id) {
+            native("offscreen.sendMessage", [message.token, message.message, sender])
+              .then(sendResponse, (error) => sendResponse({ relayError: String(error) }));
+            return true;
+          }
           // Only the worker answers; any other page stays out of it.
           if (message && message.__searchPing === true) {
             if (background) { sendResponse("pong"); return; }
@@ -898,7 +916,15 @@ enum ExtensionShims {
             if (space === "tabs" && method === "getCurrent") { sendResponse({ value: sender.tab }); return; }
             let ns; try { ns = chrome[space]; } catch (e) {}
             if (!ns || typeof ns[method] !== "function") { sendResponse({ error: "chrome." + space + "." + method + " isn't available" }); return; }
-            Promise.resolve().then(() => ns[method](...(args || [])))
+            Promise.resolve().then(async () => {
+              if (space === "scripting" && method === "executeScript" && typeof args?.[0]?.__searchFunction === "string") {
+                const { __searchFunction, args: functionArgs, ...details } = args[0];
+                if (details.files) throw new Error("Cannot specify both 'func' and 'files'");
+                const file = await native("scripting.file", [__searchFunction, functionArgs || []]);
+                return ns[method]({ ...details, files: [file] });
+              }
+              return ns[method](...(args || []));
+            })
               .then((value) => sendResponse({ value }), (e) => sendResponse({ error: String(e && e.message || e) }));
             return true;
           }
@@ -909,8 +935,10 @@ enum ExtensionShims {
             if (result === true) keep = true;
             else if (result && typeof result.then === "function") { keep = true; result.then(sendResponse, () => sendResponse(undefined)); }
           }
-          if (!inContent) tell(message, keep || settled ? "answers" : "passes", true);
+          if (!local && !inContent) tell(message, keep || settled ? "answers" : "passes", true);
           if (keep || settled) return keep && !settled ? true : undefined;
+          // A direct offscreen delivery has no other local receiver to wait for.
+          if (local) return undefined;
           // Nothing here answers it. In Chrome that leaves the question to
           // the extension's other pages and its worker; WebKit takes the
           // first reply from any of them, and an empty one from a page that
@@ -967,6 +995,14 @@ enum ExtensionShims {
           }
           return undefined;
         };
+        if (internalMessages) {
+          put(root, "__searchOffscreenDispatch", (message, sender) => new Promise((resolve) => {
+            const timer = setTimeout(() => resolve({ handled: false }), 30000);
+            const done = (result) => { clearTimeout(timer); resolve(result); };
+            const waiting = dispatch(message, sender, (value) => done({ handled: true, value }), true);
+            if (waiting !== true) done({ handled: false });
+          }));
+        }
         put(event, "addListener", (listener) => {
           listeners.add(listener);
           if (told) { join(); deliverRelayed = (m, s) => dispatch(m, s, () => {}); }
@@ -974,15 +1010,17 @@ enum ExtensionShims {
         });
         put(event, "removeListener", (listener) => {
           listeners.delete(listener);
-          if (told && listeners.size === 0) leave();
-          if (attached && listeners.size === 0) { attached = false; remove(dispatch); }
+          if (told && listeners.size === 0 && !relayHost) leave();
+          if (attached && listeners.size === 0 && !(internalMessages && (background || relayHost))) {
+            attached = false; remove(dispatch);
+          }
         });
         put(event, "hasListener", (listener) => listeners.has(listener));
         put(event, "hasListeners", () => listeners.size > 0);
         // A worker may only add listeners while it starts; one that adds its
         // first later would be refused. So in a worker the one listener is
         // WebKit's from the start.
-        if (background) { attached = true; add(dispatch); }
+        if (background || relayHost) { attached = true; add(dispatch); if (told) join(); }
       };
       if (runtime) {
         const names = new Set();
@@ -993,7 +1031,56 @@ enum ExtensionShims {
           if (typeof f === "function") put(runtime, name, f.bind(runtime));
         }
       }
-      if (inContent) return;
+      if (inContent) {
+        // A frame inside this extension's own page — its offscreen
+        // document reading a site, say — is part of that page's tab, and
+        // WebKit brings none of its messages to the page around it. So a
+        // copy goes by way of another of the extension's contexts, which
+        // hands it to the page (see offscreen.sendMessage). Only there: in a
+        // frame of a website, the page above is the website's, and a second
+        // send would only cost every message a round trip (#192).
+        const insideOwnPage = (() => {
+          try {
+            const above = location.ancestorOrigins;
+            return window !== window.top && !!above && above.length > 0 && above[above.length - 1] + "/" === runtime.getURL("");
+          } catch (e) { return false; }
+        })();
+        if (offscreenCapable && insideOwnPage && runtime && typeof runtime.sendMessage === "function") {
+          const send = runtime.sendMessage.bind(runtime);
+          let sequence = 0;
+          const prefix = Array.from(crypto.getRandomValues(new Uint32Array(4)), (n) => n.toString(16)).join("-");
+          put(runtime, "sendMessage", (...args) => {
+            const callback = typeof args[args.length - 1] === "function" ? args.pop() : null;
+            const options = args[1];
+            const isOptions = options == null || (typeof options === "object" && !Array.isArray(options)
+              && Object.keys(options).every((key) => key === "includeTlsChannelId"));
+            const explicit = args.length >= 3 || (args.length === 2 && typeof args[0] === "string" && !isOptions);
+            const own = !explicit || !args[0] || args[0] === runtime.id;
+            const original = send(...args);
+            let answer = original;
+            if (own && args.length) {
+              const relay = send({ __searchOffscreenRelay: true, token: prefix + ":" + (++sequence),
+                message: args[explicit ? 1 : 0] }).then((reply) => {
+                  if (reply && reply.relayError) throw new Error(reply.relayError);
+                  return reply && reply.handled ? reply.value : undefined;
+                });
+              // An empty native reply must not beat the parent document's
+              // reply. Preserve the first actual response from either route.
+              answer = new Promise((resolve, reject) => {
+                let left = 2, failure;
+                const done = (value) => {
+                  if (value !== undefined) resolve(value);
+                  if (--left === 0) failure ? reject(failure) : resolve(undefined);
+                };
+                for (const response of [original, relay]) response.then(done, (error) => { failure = error; done(); });
+              });
+            }
+            if (!callback) return answer;
+            answer.then(callback, (error) => withLastError(error, callback));
+          });
+        }
+        return;
+      }
 
       // In a website's frame, everything WebKit keeps to the extension's own
       // process goes through the worker instead. What stays direct is what
@@ -1003,6 +1090,11 @@ enum ExtensionShims {
         const direct = new Set(["runtime", "storage", "i18n", "extension", "permissions", "dom", "test"]);
         const ask = (space, method, args) => {
           while (args.length && args[args.length - 1] === undefined) args.pop();
+          // A function cannot cross the message channel. Keep its source
+          // separately so the worker can inject it from an extension file.
+          if (space === "scripting" && method === "executeScript" && typeof (args[0] && args[0].func) === "function") {
+            args = [{ ...args[0], func: undefined, __searchFunction: args[0].func.toString() }, ...args.slice(1)];
+          }
           let payload;
           try { payload = JSON.parse(JSON.stringify(args)); } catch (e) { return Promise.reject(e); }
           return Promise.resolve(chrome.runtime.sendMessage({ __searchCall: { space, method, args: payload } })).then((reply) => {
@@ -1073,7 +1165,6 @@ enum ExtensionShims {
         // nothing, for good. So after waking it, a page asks the worker
         // itself (its shim answers) at most every few seconds; no answer,
         // and the browser takes the extension up afresh.
-        const hasWorker = (() => { try { const b = runtime.getManifest().background || {}; return !!(b.service_worker || b.scripts || b.page); } catch (e) { return false; } })();
         // The message itself doesn't wait on the answer: a worker busy
         // starting up can take seconds. An empty reply means gone; silence
         // for a quarter of a minute does too.
@@ -1176,6 +1267,51 @@ enum ExtensionShims {
       define("downloads",
         ["download", "search", "pause", "resume", "cancel", "open", "show", "showDefaultFolder", "erase", "removeFile", "getFileIcon"],
         ["onCreated", "onChanged", "onErased", "onDeterminingFilename"]);
+      // A blob URL made in an extension worker belongs to that worker. The
+      // page WebKit uses to perform downloads cannot read it. Hand WebKit a
+      // data URL instead, then tell the extension when Search has saved it.
+      // SingleFile waits for downloads.onChanged before ending its save task.
+      if (chrome.downloads?.onChanged?.listeners) {
+        const downloads = chrome.downloads;
+        const start = downloads.download;
+        const search = downloads.search;
+        put(downloads, "download", (options, ...rest) => {
+          const callback = typeof rest[rest.length - 1] === "function" ? rest.pop() : null;
+          const pending = (async () => {
+            let request = options;
+            if (typeof options?.url === "string" && options.url.startsWith("blob:")) {
+              const blob = await (await fetch(options.url)).blob();
+              // Held whole in the worker as it is turned into a data: address:
+              // past half a gigabyte it is refused, not tried (Security).
+              if (blob.size > 512 * 1024 * 1024) throw new Error("This file is too large to save from an extension's worker (over 512 MB).");
+              const bytes = new Uint8Array(await blob.arrayBuffer());
+              let binary = "";
+              for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+              request = { ...options, url: "data:" + (blob.type || "application/octet-stream") + ";base64," + btoa(binary) };
+            }
+            const id = await start.call(downloads, request, ...rest);
+            const deadline = Date.now() + 120000;
+            const completed = async () => {
+              try {
+                const items = await search.call(downloads, { id });
+                if (items?.some((item) => item.id === id && item.state === "complete" && item.exists)) {
+                  for (const listener of [...downloads.onChanged.listeners]) listener({ id, state: { current: "complete", previous: "in_progress" } });
+                  return;
+                }
+              } catch (e) {}
+              if (Date.now() >= deadline) {
+                for (const listener of [...downloads.onChanged.listeners]) listener({ id, state: { current: "interrupted", previous: "in_progress" }, error: { current: "NETWORK_FAILED" } });
+                return;
+              }
+              setTimeout(completed, 250);
+            };
+            setTimeout(completed, 0);
+            return id;
+          })();
+          if (!callback) return pending;
+          pending.then((id) => callback(id), (error) => withLastError(error, callback));
+        });
+      }
       define("sidePanel", ["open", "setOptions", "getOptions", "setPanelBehavior", "getPanelBehavior"]);
       define("offscreen", ["createDocument", "closeDocument", "hasDocument"], [],
         { Reason: new Proxy({}, { get: (_, key) => String(key) }) });
@@ -1322,11 +1458,167 @@ enum ExtensionShims {
       put2("proxy", { settings: setting("proxy.settings"), onProxyError: event() });
       put2("omnibox", { setDefaultSuggestion: () => {}, onInputStarted: event(), onInputChanged: event(),
         onInputEntered: event(), onInputCancelled: event(), onDeleteSuggestion: event() });
-      put2("tabCapture", { capture: refuse("tabCapture.capture"), getMediaStreamId: refuse("tabCapture.getMediaStreamId"),
-        getCapturedTabs: (cb) => { if (cb) cb([]); else return Promise.resolve([]); }, onStatusChanged: event() });
-      // The picker Chrome would show, cancelled: an empty stream id.
-      put2("desktopCapture", { chooseDesktopMedia: (sources, tab, cb) => { const f = typeof tab === "function" ? tab : cb; if (f) setTimeout(() => f("", {})); return 1; },
-        cancelChooseDesktopMedia: () => {}, DesktopCaptureSourceType: { SCREEN: "screen", WINDOW: "window", TAB: "tab", AUDIO: "audio" } });
+      // Screen recording (see ExtensionCapture.swift). Chrome's picker is
+      // Search's question, then the Mac's own; the stream id it hands back is
+      // an id Search gives once, which getUserMedia in the extension's page
+      // turns into the stream. Defined only for an extension that asks for
+      // it, as in Chrome: Awesome Screenshot records with getDisplayMedia
+      // when there is no desktopCapture.
+      const declares = (name) => [...(manifest.permissions || []), ...(manifest.optional_permissions || [])].includes(name);
+      const recorder = !inContent && !worker && typeof navigator !== "undefined" && !!navigator.mediaDevices
+        && typeof root.MediaDevices === "function";
+      // Only an extension's own page, at the top: Search checks that too.
+      const captureChannel = (() => {
+        try { return recorder && !embedded && window.top === window ? root.webkit.messageHandlers.searchCapture : null; } catch (e) { return null; }
+      })();
+      const askCapture = (op, body) => captureChannel
+        ? Promise.resolve(captureChannel.postMessage(Object.assign({ op }, body)))
+        : Promise.resolve({ error: "NotAllowedError", message: "Recording isn't available here" });
+      const refused = (reply) => new DOMException(String(reply && reply.message || "Permission denied"), String(reply && reply.error || "NotAllowedError"));
+      // What WebKit's getDisplayMedia takes: no min, no exact.
+      const displayVideo = (v) => {
+        if (!v || typeof v !== "object") return true;
+        const out = {};
+        for (const k of ["width", "height", "frameRate"]) {
+          const x = v[k] ?? (v.mandatory && v.mandatory["max" + k[0].toUpperCase() + k.slice(1)]);
+          if (typeof x === "number") out[k] = { max: x };
+          else if (x && typeof x === "object") {
+            const y = {};
+            if (x.max !== undefined) y.max = x.max;
+            if (x.ideal !== undefined) y.ideal = x.ideal;
+            if (Object.keys(y).length) out[k] = y;
+          }
+        }
+        return Object.keys(out).length ? out : true;
+      };
+      if (recorder) {
+        const P = root.MediaDevices.prototype;
+        const realGUM = P.getUserMedia, realGDM = P.getDisplayMedia;
+        const held = new Map();
+        // Called by Search alone (ExtensionCapture.record). WebKit counts an
+        // app's call as a click, and only until its first await, so the
+        // page's own getDisplayMedia — kept before any of the extension's
+        // code ran — is called at once.
+        if (typeof realGDM === "function") {
+          Object.defineProperty(root, Symbol.for("search.capture"), { value: (token, video) => {
+            let started;
+            try { started = realGDM.call(navigator.mediaDevices, { video: video == null ? true : video, audio: false }); }
+            catch (e) { return Promise.resolve({ error: e.name, message: String(e.message) }); }
+            return started.then((stream) => {
+              held.set(token, stream);
+              // An id never taken is stopped, not left recording.
+              setTimeout(() => {
+                if (held.get(token) !== stream) return;
+                held.delete(token);
+                stream.getTracks().forEach((t) => t.stop());
+              }, 60000);
+              return { ok: true };
+            }, (e) => ({ error: e.name, message: String(e.message) }));
+          } });
+        }
+        // Chrome's desktop and tab constraints, which WebKit would read as a
+        // plain camera request.
+        const desktopId = (c) => {
+          if (!c || typeof c !== "object") return null;
+          const m = c.mandatory || c;
+          return /^(desktop|screen|window|tab)$/.test(String(m.chromeMediaSource || "")) ? String(m.chromeMediaSourceId || "") : null;
+        };
+        // Chrome's older constraints (mandatory, optional, goog…) in the
+        // standard form.
+        const standard = (t) => {
+          if (!t || typeof t !== "object" || !(t.mandatory || t.optional)) return t;
+          const out = {};
+          for (const [k, v] of Object.entries(t)) if (k !== "mandatory" && k !== "optional") out[k] = v;
+          const set = (name, part, v) => { const x = out[name] && typeof out[name] === "object" ? out[name] : {}; x[part] = v; out[name] = x; };
+          const read = (k, v, strong) => {
+            const m = /^(min|max)(Width|Height|FrameRate|AspectRatio)$/.exec(k);
+            if (m) return set(m[2][0].toLowerCase() + m[2].slice(1), m[1], v);
+            if (k === "sourceId" || k === "deviceId") return set("deviceId", strong ? "exact" : "ideal", v);
+            const goog = { googEchoCancellation: "echoCancellation", googAutoGainControl: "autoGainControl", googNoiseSuppression: "noiseSuppression" }[k];
+            if (goog) out[goog] = v;
+          };
+          for (const [k, v] of Object.entries(t.mandatory || {})) read(k, v, true);
+          for (const o of t.optional || []) for (const [k, v] of Object.entries(o || {})) read(k, v, false);
+          return Object.keys(out).length ? out : true;
+        };
+        const take = async (id, c) => {
+          let stream = held.get(id);
+          if (!stream && id) {
+            const reply = await askCapture("consume", { token: id, video: displayVideo(c.video) });
+            if (!reply || !reply.ok) throw refused(reply);
+            stream = held.get(id);
+          }
+          held.delete(id);
+          if (!stream) throw refused();
+          // The sound of a screen or a tab alone: WebKit records none.
+          if (desktopId(c.video) === null) {
+            stream.getTracks().forEach((t) => t.stop());
+            throw new DOMException("Search can't record the sound of a screen or a tab", "NotFoundError");
+          }
+          const [track] = stream.getVideoTracks();
+          const want = displayVideo(c.video);
+          if (track && want !== true) try { await track.applyConstraints(want); } catch (e) {}
+          return stream;
+        };
+        put(P, "getUserMedia", function (c) {
+          const asked = c || {};
+          const id = desktopId(asked.video) ?? desktopId(asked.audio);
+          if (id !== null) return take(id, asked);
+          const self = this;
+          // An offscreen document is lent to the pill first (see
+          // ExtensionCapture, "lend"); one not made to record is refused.
+          return askCapture("lend", {}).then((reply) => {
+            if (captureChannel && (!reply || !reply.ok)) throw refused(reply);
+            return realGUM.call(self, { audio: standard(asked.audio), video: standard(asked.video) });
+          });
+        });
+        if (typeof realGDM === "function") {
+          put(P, "getDisplayMedia", function (c) {
+            const asked = c || {};
+            const surface = asked.video && typeof asked.video === "object" ? String(asked.video.displaySurface || "") : "";
+            return askCapture("display", { video: displayVideo(asked.video), surface }).then((reply) => {
+              const stream = reply && reply.ok && held.get(reply.token);
+              if (!stream) throw refused(reply);
+              held.delete(reply.token);
+              return stream;
+            });
+          });
+        }
+        // Chrome's older callback form, which Loom still records with.
+        const legacy = function (c, ok, fail) {
+          navigator.mediaDevices.getUserMedia(c).then(ok, (e) => { if (typeof fail === "function") fail(e); });
+        };
+        for (const name of ["getUserMedia", "webkitGetUserMedia"]) {
+          if (typeof navigator[name] !== "function") put(root.Navigator.prototype, name, legacy);
+        }
+      }
+      if (declares("desktopCapture")) {
+        let asks = 0;
+        const cancelled = new Set();
+        put2("desktopCapture", {
+          chooseDesktopMedia: (sources, tab, cb) => {
+            const f = typeof tab === "function" ? tab : cb;
+            const id = ++asks;
+            const done = (token) => { if (!cancelled.has(id) && typeof f === "function") f(token || "", { canRequestAudioTrack: false }); };
+            // From a page: asked and recorded there at once, so a cancelled
+            // picker is an empty id, as in Chrome. From the worker, which has
+            // nothing to record in: an id for one of its pages to use.
+            const asked = worker || background || !captureChannel
+              ? native("capture.grant", [sources || []])
+              : askCapture("choose", { sources: sources || [] }).then((r) => (r && r.ok ? r.token : ""));
+            Promise.resolve(asked).then(done, () => done(""));
+            return id;
+          },
+          cancelChooseDesktopMedia: (id) => { cancelled.add(id); },
+          DesktopCaptureSourceType: { SCREEN: "screen", WINDOW: "window", TAB: "tab", AUDIO: "audio" },
+        });
+      }
+      // A tab alone can't be recorded in Search: an extension that falls back
+      // to the screen, as Loom does, records the window instead.
+      if (declares("tabCapture")) {
+        put2("tabCapture", { capture: refuse("tabCapture.capture"), getMediaStreamId: refuse("tabCapture.getMediaStreamId"),
+          getCapturedTabs: (cb) => { if (cb) cb([]); else return Promise.resolve([]); }, onStatusChanged: event() });
+      }
       put2("pageCapture", { saveAsMHTML: refuse("pageCapture.saveAsMHTML") });
       put2("debugger", { attach: refuse("debugger.attach"), detach: refuse("debugger.detach"),
         sendCommand: refuse("debugger.sendCommand"), getTargets: (cb) => { if (cb) cb([]); else return Promise.resolve([]); },
@@ -1707,14 +1999,163 @@ enum ExtensionShims {
           p.then((r) => callback(r));
         });
       }
+      // WebKit's rules take a narrow kind of regular expression: no `|` and
+      // no `(?:`. Tampermonkey's rule for .user.js links has both, so a
+      // script couldn't be installed from a link (idea 197). A pattern
+      // that can be written without them, matching exactly the same
+      // addresses, becomes that many rules; one that can't (a choice inside
+      // a repeated group, a look-around) is left out as before. Nothing is
+      // widened: every rule matches what its pattern matched.
+      const expandRegex = (source, limit = 24) => {
+        let i = 0;
+        // An atom repeated a counted number of times, a{2,4}, written out
+        // as a a a? a?: the same strings, without the braces WebKit refuses.
+        const counted = (atom) => {
+          const m = /^\{(\d+)(,(\d*))?\}/.exec(source.slice(i));
+          if (!m) return atom;
+          const least = Number(m[1]), most = m[2] === undefined ? least : m[3] === "" ? null : Number(m[3]);
+          if (most === null || most < least || most > 12) return null;
+          i += m[0].length;
+          return atom.repeat(least) + (atom + "?").repeat(most - least);
+        };
+        const alternatives = () => {
+          let options = [""];
+          const all = [];
+          while (i < source.length) {
+            const c = source[i];
+            if (c === "\\") {
+              const kind = source[i + 1];
+              const size = kind === "x" ? 4 : kind === "c" ? 3
+                : kind === "u" ? (source[i + 2] === "{" ? source.indexOf("}", i) + 1 - i : 6) : 2;
+              if (size < 2 || /[1-9]/.test(kind || "")) return null;
+              const t = source.slice(i, i + size);
+              i += size;
+              const piece = counted(t);
+              if (piece === null) return null;
+              options = options.map((o) => o + piece);
+              continue;
+            }
+            if (c === "[") {
+              let j = i + 1;
+              if (source[j] === "^") j++;
+              if (source[j] === "]") j++;
+              while (j < source.length && source[j] !== "]") { if (source[j] === "\\") j++; j++; }
+              const t = source.slice(i, j + 1);
+              i = j + 1;
+              const piece = counted(t);
+              if (piece === null) return null;
+              options = options.map((o) => o + piece);
+              continue;
+            }
+            if (c === "|") { all.push(...options); options = [""]; i++; continue; }
+            if (c === ")") break;
+            if (c === "(") {
+              i++;
+              if (source.startsWith("?:", i)) i += 2;
+              else if (source[i] === "?") return null;
+              const inner = alternatives();
+              if (inner === null || source[i] !== ")") return null;
+              i++;
+              if (/^[*+?{]/.test(source[i] || "")) {
+                if (inner.length > 1 || source[i] === "{") return null;
+                options = options.map((o) => o + "(" + inner[0] + ")");
+                continue;
+              }
+              options = options.flatMap((o) => inner.map((x) => o + x));
+              if (options.length > limit) return null;
+              continue;
+            }
+            i++;
+            const piece = /[.\w/:-]/.test(c) ? counted(c) : c;
+            if (piece === null) return null;
+            options = options.map((o) => o + piece);
+          }
+          all.push(...options);
+          return all.length > limit ? null : all;
+        };
+        const out = alternatives();
+        return out === null || i !== source.length ? null : out;
+      };
+      // The rules made from one are kept out of sight: the extension sees its
+      // own, and taking it away takes them too. Their ids come from the
+      // rule's own, so nothing has to be remembered — a relaunch, a worker
+      // started afresh or a second page all know which they are (Security).
+      const madeBase = 1000000000, madeStride = 32;
+      const madeIds = (id) => Number.isInteger(id) && id >= 1 && id < 30000000
+        ? Array.from({ length: madeStride - 1 }, (_, k) => madeBase + id * madeStride + k + 1) : [];
+      const madeFrom = (id, present) => {
+        if (!Number.isInteger(id) || id <= madeBase) return null;
+        const offset = id - madeBase, k = offset % madeStride, from = (offset - k) / madeStride;
+        return k && present.has(from) ? from : null;
+      };
+      const spread = (name, rule, taken) => {
+        const c = rule && rule.condition;
+        const pattern = c && c.regexFilter;
+        if (typeof pattern !== "string" || !/\||\(\?:|\{\d/.test(pattern)) return [rule];
+        const substitution = rule.action && rule.action.redirect && rule.action.redirect.regexSubstitution;
+        if (typeof substitution === "string" && /\\[1-9]/.test(substitution)) return [rule];
+        const patterns = expandRegex(pattern);
+        if (!patterns || !patterns.length) return [rule];
+        const ids = madeIds(rule.id);
+        // An id past what the scheme holds, or one already an extension's
+        // own: this rule isn't written out, and is left out as before.
+        if (patterns.length > 1 && (ids.length < patterns.length - 1 || ids.slice(0, patterns.length - 1).some((id) => taken.has(id)))) return [rule];
+        return patterns.map((regexFilter, k) => ({ ...rule, id: k === 0 ? rule.id : ids[k - 1], condition: { ...c, regexFilter } }));
+      };
+      const rawGet = {};
+      for (const [get, name] of [["getSessionRules", "updateSessionRules"], ["getDynamicRules", "updateDynamicRules"]]) {
+        if (!dnr || typeof dnr[get] !== "function") continue;
+        const original = dnr[get].bind(dnr);
+        rawGet[name] = () => Promise.resolve(original()).then((r) => r || []);
+        put(dnr, get, (filter, callback) => {
+          if (typeof filter === "function") { callback = filter; filter = undefined; }
+          const p = rawGet[name]().then((all) => {
+            const present = new Set(all.map((r) => r.id));
+            const own = all.filter((r) => madeFrom(r.id, present) === null);
+            const ids = filter && Array.isArray(filter.ruleIds) ? new Set(filter.ruleIds) : null;
+            return ids ? own.filter((r) => ids.has(r.id)) : own;
+          });
+          if (typeof callback !== "function") return p;
+          p.then((r) => callback(r), (e) => withLastError(e, callback));
+        });
+      }
       if (dnr) for (const name of ["updateSessionRules", "updateDynamicRules"]) {
         if (typeof dnr[name] !== "function") continue;
         const original = dnr[name].bind(dnr);
         put(dnr, name, (options = {}, callback) => {
-          if (options && Array.isArray(options.addRules)) options = { ...options, addRules: options.addRules.map(mendRule).filter(Boolean) };
+          const ready = (rawGet[name] ? rawGet[name]() : Promise.resolve([])).catch(() => []).then((all) => {
+            const present = new Set(all.map((r) => r.id));
+            if (options && Array.isArray(options.removeRuleIds)) {
+              const gone = new Set(options.removeRuleIds);
+              const extra = all.map((r) => r.id).filter((id) => gone.has(madeFrom(id, present)));
+              if (extra.length) options = { ...options, removeRuleIds: options.removeRuleIds.concat(extra) };
+            }
+            if (options && Array.isArray(options.addRules)) {
+              const leaving = new Set(options.removeRuleIds || []);
+              const taken = new Set([...present].filter((id) => !leaving.has(id) && !leaving.has(madeFrom(id, present))));
+              options.addRules.forEach((r) => r && taken.add(r.id));
+              options = { ...options, addRules: options.addRules.map(mendRule).filter(Boolean).flatMap((r) => spread(name, r, taken)) };
+            }
+          });
           const attempt = async (opts, left) => {
             try { return await original(opts); }
             catch (e) {
+              // WebKit builds one content blocker of an extension's rules,
+              // and it can't hold rules for some sites beside rules for all
+              // but some: Tampermonkey's rule for any .user.js link, all but
+              // its own sites, kept every other rule from loading. The
+              // all-but rules are left out, as a refused rule is.
+              if (/Unable to load declarativeNetRequest rules/.test(String(e && e.message)) && Array.isArray(opts.addRules) && left > 0) {
+                const excluding = (r) => { const c = r && r.condition; return !!(c && (c.excludedRequestDomains || c.excludedInitiatorDomains || c.excludedDomains)); };
+                const narrowing = (r) => { const c = r && r.condition; return !!(c && (c.requestDomains || c.initiatorDomains || c.domains)); };
+                if (opts.addRules.some(excluding) && opts.addRules.some(narrowing)) {
+                  for (const rule of opts.addRules.filter(excluding)) {
+                    const kind = rule && rule.action && rule.action.type || "?";
+                    try { native("debug.error", ["declarativeNetRequest: " + kind + " rule " + (rule && rule.id) + " left out — it excludes sites beside rules for given sites, which WebKit can't load together"]).catch(() => {}); } catch (x) {}
+                  }
+                  return attempt({ ...opts, addRules: opts.addRules.filter((r) => !excluding(r)) }, left - 1);
+                }
+              }
               const at = /rule at index (\d+)/.exec(String(e && e.message));
               if (!at || !Array.isArray(opts.addRules) || left <= 0) throw e;
               const index = Number(at[1]);
@@ -1723,7 +2164,10 @@ enum ExtensionShims {
               return attempt({ ...opts, addRules: opts.addRules.filter((_, i) => i !== index) }, left - 1);
             }
           };
-          const p = attempt(options, 100);
+          const p = ready.then(() => attempt(options, 100));
+          // In a test run, an update that still fails is said, not only
+          // handed back to an extension that may drop it.
+          if (__SEARCH_VERBOSE__) p.catch((e) => { try { native("debug.error", ["declarativeNetRequest: " + name + " failed — " + (e && e.message)]).catch(() => {}); } catch (x) {} });
           if (typeof callback !== "function") return p;
           p.then(() => callback(), (e) => withLastError(e, callback));
         });
@@ -1843,14 +2287,42 @@ enum ExtensionShims {
           });
         }
         for (const name of ["get", "getAll", "getCurrent", "getLastFocused", "create"]) mendResult(chrome.windows, name);
+        // WebKit's windows.getCurrent ignores which extension page called
+        // it and returns the frontmost window. In a top-level extension page
+        // opened in a tab — a popup window's page among them (Bitwarden's
+        // passkey window) — find that page's current tab each time and ask
+        // for its window instead. When there is no real tab, as in a toolbar
+        // action popup or an offscreen page, keep WebKit's answer; workers
+        // and content scripts never enter here. From #408, by lulkebit.
+        if (!inContent && !embedded && typeof document !== "undefined"
+            && chrome.windows && typeof chrome.windows.getCurrent === "function"
+            && typeof chrome.windows.get === "function" && typeof chrome.tabs.getCurrent === "function") {
+          const getCurrentWindow = chrome.windows.getCurrent.bind(chrome.windows);
+          const getWindow = chrome.windows.get.bind(chrome.windows);
+          const getCurrentTab = chrome.tabs.getCurrent.bind(chrome.tabs);
+          put(chrome.windows, "getCurrent", (...args) => {
+            const callback = typeof args[args.length - 1] === "function" ? args.pop() : null;
+            const getInfo = typeof args[0] === "function" ? undefined : args[0];
+            const options = getInfo === undefined ? [] : [getInfo];
+            const p = Promise.resolve().then(() => getCurrentTab()).then((tab) => {
+              const windowId = tab && tab.windowId;
+              const hasPlace = tab && Number.isInteger(tab.index) && tab.index >= 0 && tab.index < 1e6
+                && Number.isInteger(windowId) && windowId >= 0;
+              return hasPlace ? getWindow(windowId, ...options) : getCurrentWindow(...options);
+            }, () => getCurrentWindow(...options));
+            if (!callback) return p;
+            p.then((window) => callback(window), (error) => withLastError(error, callback));
+          });
+        }
         // Listeners given a tab: the tab is mended before they see it.
-        const mendArgs = (target, positions, told) => {
+        const mendArgs = (target, positions, told, skip) => {
           if (!target || typeof target.addListener !== "function") return;
           const add = target.addListener.bind(target), remove = target.removeListener.bind(target);
           const wrapped = new Map();
           put(target, "addListener", (listener, ...rest) => {
             const state = new Map();
             const w = function (...args) {
+              if (skip && skip(args)) return;
               const pending = mend(positions.map((i) => args[i]));
               if (!pending) { if (told) told(args, state); return listener.apply(this, args); }
               pending.then(() => { if (told) told(args, state); listener.apply(this, args); });
@@ -1861,7 +2333,11 @@ enum ExtensionShims {
           put(target, "removeListener", (listener) => { const w = wrapped.get(listener); wrapped.delete(listener); return remove(w || listener); });
           put(target, "hasListener", (listener) => wrapped.has(listener));
         };
-        mendArgs(chrome.tabs.onCreated, [0]);
+        // An offscreen document is a tab to WebKit, so that its frames'
+        // content scripts can name it, but in no window: the extension
+        // never hears of it coming or going, as in Chrome (#192).
+        mendArgs(chrome.tabs.onCreated, [0], null, (args) => isTab(args[0]) && args[0].windowId === -1);
+        mendArgs(chrome.tabs.onRemoved, [], null, (args) => !!args[1] && args[1].windowId === -1);
         // What changed, in onUpdated's changeInfo. Without host access
         // WebKit blanks url and title there ("") and leaves favIconUrl out,
         // and a tab manager, or an extension watching its sign-in tab, reads
@@ -2764,8 +3240,6 @@ enum ExtensionShims {
     /// button should open it.
     static var panelPath: [String: String] = [:]
     static var panelOnClick: Set<String> = []
-    /// Offscreen documents, one per extension, as Chrome allows.
-    static var offscreen: [String: WKWebView] = [:]
     /// One voice for every extension that reads aloud.
     static let speaker = NSSpeechSynthesizer()
 
@@ -2858,7 +3332,7 @@ enum ExtensionShims {
     static func forgetIcons() { favIcons.removeAll() }
 
     private static func favIconURL(_ tab: Tab) -> String? {
-        guard let host = tab.address?.host(), let icon = tab.icon ?? Favicons.shared.cached(host) else { return nil }
+        guard let host = tab.address.flatMap(Favicons.site), let icon = tab.icon ?? Favicons.shared.cached(host) else { return nil }
         if let known = favIcons[host] { return known }
         let side = 32
         guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8,
@@ -3088,27 +3562,25 @@ enum ExtensionShims {
             return nil
 
         // MARK: offscreen — a page with a DOM for a worker that has none
+        // MARK: capture — a stream id for the worker's chooseDesktopMedia
+        case "capture.grant":
+            return await ExtensionCapture.shared.grant(for: context)
+
         case "offscreen.createDocument":
-            guard offscreen[id] == nil else { throw Unsupported(what: "Only a single offscreen document may be created.") }
-            guard let path = (first as? [String: Any])?["url"] as? String,
-                  let configuration = context.webViewConfiguration
+            guard let path = (first as? [String: Any])?["url"] as? String
             else { throw Unsupported(what: "No page for the offscreen document") }
-            let page = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), configuration: configuration)
-            guard let url = ExtensionShims.page(path, in: context) else { throw Unsupported(what: "No page for the offscreen document") }
-            page.load(URLRequest(url: url))
-            offscreen[id] = page
-            // Answered once the page has loaded, as Chrome does: the worker's
-            // next line is a message to it, and a page still loading has no
-            // one listening yet.
-            for _ in 0..<250 where page.isLoading || page.url == nil {
-                try? await Task.sleep(for: .milliseconds(20))
-            }
+            let reasons = (first as? [String: Any])?["reasons"] as? [String] ?? []
+            try await ExtensionOffscreen.create(path, reasons: reasons, for: context)
             return nil
         case "offscreen.closeDocument":
-            offscreen[id] = nil
+            ExtensionOffscreen.close(for: id)
             return nil
         case "offscreen.hasDocument":
-            return offscreen[id] != nil
+            return ExtensionOffscreen.hasDocument(for: id)
+        case "offscreen.sendMessage":
+            guard args.count == 3, let token = first as? String,
+                  let sender = args[2] as? [String: Any] else { return ["handled": false] }
+            return try await ExtensionOffscreen.send(args[1], sender: sender, token: token, for: id)
 
         // MARK: fonts — what the Mac has; the page's own fonts stay the page's
         case "fontSettings.getFontList":
@@ -3168,7 +3640,7 @@ enum ExtensionShims {
                 add("BACKGROUND", script.map { context.baseURL.appendingPathComponent($0) })
             }
             if ExtensionPopup.shared.extensionID == id { add("POPUP", ExtensionPopup.shared.view?.url) }
-            if let page = offscreen[id] { add("OFFSCREEN_DOCUMENT", page.url) }
+            found += ExtensionOffscreen.contexts(for: id, matching: filter)
             return found
 
         // MARK: notifications — the Mac's own
@@ -3275,7 +3747,7 @@ enum ExtensionShims {
                 pages.append(["id": tab.id.uuidString, "url": url.absoluteString, "visible": shown, "focused": shown && web.window?.isKeyWindow == true])
             }
             // Its offscreen document too, as Chrome lists it.
-            if let url = offscreen[id]?.url { pages.append(["id": "offscreen", "url": url.absoluteString, "visible": false, "focused": false]) }
+            if let url = ExtensionOffscreen.url(for: id) { pages.append(["id": "offscreen", "url": url.absoluteString, "visible": false, "focused": false]) }
             return pages
 
         // MARK: the button's popup
@@ -3290,7 +3762,9 @@ enum ExtensionShims {
             }
             return nil
 
-        // MARK: user scripts
+        // MARK: script injection and user scripts
+        case "scripting.file":
+            return try scriptingFile(first as? String ?? "", arguments: args.dropFirst().first as? [Any] ?? [], in: Extensions.folder(for: id))
         case "userScripts.file":
             return try userScriptFile(first as? [String: Any] ?? [:], in: Extensions.folder(for: id))
         case "userScripts.list":
@@ -3603,6 +4077,30 @@ enum ExtensionShims {
     }
 
     // MARK: - the side panel
+
+    /// A function sent by an extension page inside a website's frame cannot
+    /// survive the JSON message to its worker. Write it as a file for WebKit's
+    /// scripting API, with its JSON arguments and final result intact.
+    static func scriptingFile(_ function: String, arguments: [Any], in folder: URL) throws -> String {
+        // A megabyte of source at most: a page gone wrong can't fill the
+        // extension's folder with big files (Security).
+        guard !function.isEmpty, function.utf8.count <= 1_000_000, JSONSerialization.isValidJSONObject(arguments),
+              let data = try? JSONSerialization.data(withJSONObject: arguments),
+              let args = String(data: data, encoding: .utf8)
+        else { throw Unsupported(what: "Invalid script function or arguments") }
+        let source = "(\(function))(...\(args))\n"
+        let name = "script-" + SHA256.hash(data: Data(source.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined() + ".js"
+        let dir = folder.appendingPathComponent("_search", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(name)
+        if !FileManager.default.fileExists(atPath: url.path) { try source.write(to: url, atomically: true, encoding: .utf8) }
+        for old in (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        where old.lastPathComponent.hasPrefix("script-") && old != url {
+            let age = (try? old.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate).map { -$0.timeIntervalSinceNow } ?? 0
+            if age > 60 { try? FileManager.default.removeItem(at: old) }
+        }
+        return "_search/" + name
+    }
 
     /// A user script as a file WebKit can inject: its code — inline, or read
     /// from the extension's own files — inside a block that leaves at once

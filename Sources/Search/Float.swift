@@ -827,6 +827,27 @@ enum Players {
     }
 }
 
+/// Sites whose videos never float out on their own: the site card's Don't
+/// Float Videos Here (#267). Only switching tabs or apps is held back; ⇧⌘P
+/// still lifts one by hand. Kept by host, as a site's sound is, and
+/// forgotten with the other site choices (Browser.forgetCaptureChoices).
+enum Grounded {
+    static let prefix = "nofloat."
+
+    static func holds(_ host: String) -> Bool {
+        Store.settings.bool(forKey: prefix + host)
+    }
+
+    /// Off keeps nothing, as Autoplay's does.
+    static func set(_ on: Bool, for host: String) {
+        if on {
+            Store.settings.set(true, forKey: prefix + host)
+        } else {
+            Store.settings.removeObject(forKey: prefix + host)
+        }
+    }
+}
+
 /// A panel that takes key status without bringing the whole app forward.
 ///
 /// Borderless windows refuse to become key by default, and a window that never
@@ -874,8 +895,8 @@ enum Isolate {
         'max-width:none !important; max-height:none !important;',
         // Players such as Netflix center the element with a translation.
         // With our top/left at zero, that moves it out of the floating window.
-        'transform:none !important;',
-        'object-fit:contain !important; z-index:2147483647 !important}',
+        'transform:none !important; translate:none !important; rotate:none !important; scale:none !important;',
+        'opacity:1 !important; object-fit:contain !important; z-index:2147483647 !important}',
         // Netflix renders timed text after the video, in a layer of its own
         // beside it or one level up. Keep it above the video without
         // exposing the rest of the player.
@@ -888,7 +909,20 @@ enum Isolate {
         // that box sits partly or wholly off screen, more so on a page that
         // was scrolled. That was the black window.
         'html.office-floating body :has([data-office-float]) {',
-        'overflow:visible !important}',
+        'overflow:visible !important;',
+        // And fixed is only fixed to the window while no ancestor makes a
+        // box of its own for it: a transform, a filter, containment, a
+        // perspective, a backdrop, a container query — Twitch's player has
+        // some — and the video was placed and sized inside that box instead,
+        // part of it or none of it in the window. An ancestor drawn only
+        // when on screen (content-visibility) wasn't drawn at all once the
+        // rest of the page was hidden, and one faded out hid the video too.
+        'transform:none !important; translate:none !important; rotate:none !important; scale:none !important;',
+        'filter:none !important; backdrop-filter:none !important; -webkit-backdrop-filter:none !important;',
+        'perspective:none !important; contain:none !important; container-type:normal !important;',
+        'will-change:auto !important; content-visibility:visible !important;',
+        'clip-path:none !important; mask:none !important; -webkit-mask:none !important;',
+        'opacity:1 !important}',
         // The player's own controls would sit under ours, and two sets of
         // buttons on one small window is one set too many.
         'html.office-floating [data-office-float]::-webkit-media-controls {',

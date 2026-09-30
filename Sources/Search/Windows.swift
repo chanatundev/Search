@@ -162,7 +162,6 @@ enum Browsers {
 
     /// A window around `browser`, made here rather than by SwiftUI.
     static func open(_ browser: Browser, frame: NSRect?) {
-        register(browser)
         let popup = browser.extensionPopup != nil
         let host: NSView
         if popup {
@@ -180,6 +179,9 @@ enum Browsers {
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false
         )
+        // A popup has no ContentView.dress() to tie the browser to its window;
+        // tied here, before extensions hear of it (#408, lulkebit).
+        browser.window = window
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         window.contentView = host
@@ -199,6 +201,10 @@ enum Browsers {
             window.center()
         }
         frames[ObjectIdentifier(browser)] = window
+        // Extensions hear of the window only now, with its real frame there
+        // to report: told first, a popup's windows.update and getCurrent met
+        // a window with no frame and no NSWindow behind it (#408, lulkebit).
+        register(browser)
         Bench.keepOff(window)
         window.makeKeyAndOrderFront(nil)
         comeForward()
@@ -227,6 +233,7 @@ enum Browsers {
 
     static func closing(_ window: NSWindow) {
         guard !quitting, let browser = browser(for: window) else { return }
+        browser.cancelFileImport()
         // An extension's popup goes, and isn't one ⇧⌘T brings back.
         if browser.extensionPopup != nil {
             retire(browser, remembered: false)
@@ -319,6 +326,16 @@ enum Browsers {
     static func read() -> [WindowRecord] {
         guard let data = try? Data(contentsOf: file) else { return [] }
         return (try? JSONDecoder().decode([WindowRecord].self, from: data)) ?? []
+    }
+
+    /// Start with a fresh window (see Session.startFresh): one window, the
+    /// first, where it was; the others' tabs don't come back, and their
+    /// pins are every window's anyway (Pins.swift).
+    static func startFresh() {
+        let records = read()
+        guard records.count > 1 else { return }
+        let first = [records[0]]
+        Disk.write(file, now: true) { try? JSONEncoder().encode(first) }
     }
 
     /// At launch, once the first window is up.

@@ -18,6 +18,15 @@ struct SearchApp: App {
     /// What the menus act on: the window in front's browser.
     private var browser: Browser { front.browser ?? SceneSlot.shared.browser }
 
+    init() {
+        // Settings › General › Start with a fresh window: the files are cut
+        // down before any window reads its row from them.
+        if Store.settings.bool(forKey: Preferences.freshKey) {
+            Session.startFresh(spaces: Spaces.read().map(\.id))
+            Browsers.startFresh()
+        }
+    }
+
     var body: some Scene {
         // Where you left it, at the size you left it. SwiftUI saves a
         // window's frame under its id and puts it back before the window
@@ -43,7 +52,7 @@ struct SearchApp: App {
                     .shortcut("file.newTab")
                 Button("New Private Tab") { browser.newShyTab() }
                     .shortcut("file.newPrivateTab")
-                Button("Reopen Closed Tab") { browser.reopen() }
+                Button(browser.reopenTitle) { browser.reopen() }
                     .shortcut("file.reopen")
                     .disabled(browser.ghosts.isEmpty && Browsers.lastClosedAt == nil)
                 Divider()
@@ -56,7 +65,7 @@ struct SearchApp: App {
                 Button("Bring Things Over…") { browser.bringingIn = "" }
                     .shortcut("file.import")
                 Divider()
-                Button("Close Tab") { if let tab = browser.active { browser.close(tab) } }
+                Button("Close Tab") { browser.closeFront() }
                     .shortcut("file.closeTab")
                 Divider()
                 Button("Command Palette…") { browser.commandPalette.toggle() }
@@ -180,11 +189,21 @@ struct SearchApp: App {
                     Divider()
                 }
                 if let tab = browser.active {
+                    let rows = browser.prefs.showsPinRows
                     if tab.pin == nil {
                         Button("Pin Tab") { browser.pin(tab) }
                             .disabled(tab.isBlank || tab.shy)
+                        if rows {
+                            Button("Pin Tab as Row") { browser.pin(tab, listed: true) }
+                                .disabled(tab.isBlank || tab.shy)
+                        }
                     } else {
-                        Button("Change Letter") { browser.editLetter(tab) }
+                        if rows {
+                            Button(tab.listed ? "Show Pin as Square" : "Show Pin as Row") { browser.setListed(tab, !tab.listed) }
+                        }
+                        if !(rows && tab.listed) {
+                            Button("Change Letter") { browser.editLetter(tab) }
+                        }
                         Button("Unpin Tab") { browser.unpin(tab) }
                     }
                 }
@@ -280,8 +299,8 @@ private struct MenuLine: View {
     let url: URL
 
     var body: some View {
-        if let host = url.host()?.lowercased(),
-           let icon = Favicons.shared.cached(host) {
+        if let site = Favicons.site(url),
+           let icon = Favicons.shared.cached(site) {
             Label {
                 Text(title)
             } icon: {
@@ -511,7 +530,10 @@ struct ContentView: View {
     /// own whenever a tab has nowhere to be yet.
     @ViewBuilder
     private var field: some View {
-        if browser.fieldShowing, browser.activeSplit == nil {
+        // SplitStage owns the field whenever Split View is enabled, including
+        // an ordinary tab that is not currently paired. Drawing it here too
+        // leaves two offset address fields on a blank tab.
+        if browser.fieldShowing, !browser.prefs.splitView {
             Omnibox(browser: browser, over: !(browser.active?.isBlank ?? true))
                 // Centred on the page, not on the window. The column of tabs
                 // is not what the field is standing over, and dimming it along
@@ -604,6 +626,9 @@ struct ContentView: View {
             .overlay { field }
             .overlay { panels }
             .overlay { TabSwitcherOverlay(browser: browser, switcher: browser.tabSwitcher) }
+            .overlay(alignment: .topTrailing) {
+                if let job = browser.fileImport { ImportProgress(browser: browser, job: job) }
+            }
             // The field comes on its spring, and goes quickly: once Return
             // is pressed the page is on its way, and the field is not what
             // there is to watch.
@@ -745,10 +770,12 @@ struct ContentView: View {
     /// with the answer remembered so it is asked once and not every call.
     private func captureAsking(_ ask: Browser.CaptureAsk) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: ask.wants == "location" ? "location" : ask.wants == "microphone" ? "mic" : "video")
+            Image(systemName: ask.wants == "location" ? "location" : ask.wants == "microphone" ? "mic" : ask.wants == "notifications" ? "bell" : "video")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Palette.muted)
-            Text(ask.wants == "location" ? "\(ask.host) wants to know your location" : "\(ask.host) wants to use your \(ask.wants)")
+            Text(ask.wants == "location" ? "\(ask.host) wants to know your location"
+                 : ask.wants == "notifications" ? "\(ask.host) wants to send you notifications"
+                 : "\(ask.host) wants to use your \(ask.wants)")
                 .font(.system(size: 12.5))
                 .foregroundStyle(Palette.ink)
             Button { ask.once ? browser.allowCaptureOnce() : browser.allowCapture() } label: {
@@ -870,9 +897,12 @@ struct ContentView: View {
     }
 
     /// Either visible pane may give its page to WebKit's fullscreen window.
+    /// Read through immersionRevision: a tab's going full screen and coming
+    /// back are the tab's changes, not the browser's, and this view watches
+    /// only the browser (see fullscreenWatch).
     private var fullscreenTab: Tab? {
-        guard browser.prefs.splitView else { return browser.active?.immersed == true ? browser.active : nil }
         _ = immersionRevision
+        guard browser.prefs.splitView else { return browser.active?.immersed == true ? browser.active : nil }
         if let split = browser.activeSplit,
            let immersed = browser.tabs.first(where: { split.contains($0.id) && $0.immersed }) {
             return immersed
@@ -880,11 +910,13 @@ struct ContentView: View {
         return browser.active?.immersed == true ? browser.active : nil
     }
 
+    /// The pages on screen, watched for full screen. The page alone too: left
+    /// unwatched, a video's full screen ended with nothing to draw the window
+    /// again, and the column stayed away until something else did — until
+    /// the column was switched off and on again, as it was reported.
     @ViewBuilder
     private var fullscreenWatch: some View {
-        if !browser.prefs.splitView {
-            // Nothing to watch: the page on screen is the only one.
-        } else if let split = browser.activeSplit {
+        if browser.prefs.splitView, let split = browser.activeSplit {
             if let left = browser.tabs.first(where: { $0.id == split.left }) {
                 TabImmersionWatch(tab: left) { immersionRevision += 1 }.id(left.id)
             }
@@ -972,7 +1004,16 @@ struct ContentView: View {
     /// keystrokes because this runs first.
     private func watchKeys() {
         guard keys == nil else { return }
-        keys = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
+        keys = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged, .leftMouseDown]) { event in
+            // A click on the tab switcher, in this window only (see
+            // Browser.clickTabSwitcher), turned into the top-left coordinates
+            // SwiftUI's frames are in.
+            if event.type == .leftMouseDown {
+                guard let window, event.window === window, let height = window.contentView?.bounds.height
+                else { return event }
+                let at = event.locationInWindow
+                return browser.clickTabSwitcher(at: CGPoint(x: at.x, y: height - at.y)) ? nil : event
+            }
             // Every window has a monitor, and every monitor hears every key:
             // each takes only its own window's, and the one in front takes
             // those of windows that aren't a browser's (a panel, the little
@@ -1129,38 +1170,8 @@ struct ContentView: View {
                 withAnimation(Motion.glide) { browser.makingSpace = false }
                 return true
             }
-            if browser.notesShowing {
-                browser.notesShowing = false
-                return true
-            }
-            if browser.newsShowing {
-                browser.newsShowing = false
-                return true
-            }
-            if browser.tuning {
-                browser.tuning = false
-                return true
-            }
-            if browser.bookmarking {
-                browser.bookmarking = false
-                return true
-            }
-            if browser.managing {
-                browser.managing = false
-                return true
-            }
-            if browser.bringingIn != nil {
-                browser.bringingIn = nil
-                return true
-            }
-            if browser.recalling {
-                browser.recalling = false
-                return true
-            }
-            if browser.hoarding {
-                browser.hoarding = false
-                return true
-            }
+            // The same panels in the same order as ⌘W (Browser.closeFront).
+            if browser.closePanel() { return true }
             if browser.suggesting != nil {
                 browser.dropChoice()
                 return true
@@ -1186,6 +1197,17 @@ struct ContentView: View {
                 browser.picked = nil
                 return true
             }
+            // A new tab never sent anywhere is itself what is open: Escape
+            // takes it away, back to the tab you were on, which is the one
+            // touched last. Chosen before closing, so close() doesn't wake a
+            // neighbour on the way. Anything typed keeps it; so does being
+            // the last tab, where closing it would close the window.
+            if let blank = browser.active, blank.isBlank, browser.typed.isEmpty,
+               let back = browser.tabs.filter({ $0.id != blank.id }).max(by: { $0.touched < $1.touched }) {
+                browser.select(back)
+                browser.close(blank)
+                return true
+            }
             guard browser.editing, browser.active?.isBlank == false else { return false }
             browser.dismiss()
             return true
@@ -1206,10 +1228,12 @@ struct ContentView: View {
         // Lock says. Not while typing in the peeked page — a comment box or
         // a mail there sends with the same keys — by the page's word or by
         // the caret being in something editable, in any frame.
+        // ⌥⌘Return, with Split View on, keeps it beside the page instead.
         if event.keyCode == 36 || event.keyCode == 76,
-           flags.intersection([.command, .shift, .option, .control]) == .command,
+           flags.intersection([.command, .shift, .option, .control]) == .command
+            || (browser.prefs.splitView && flags.intersection([.command, .shift, .option, .control]) == [.command, .option]),
            let peek = browser.peekTab, !peek.typing, peek.built?.inputContext == nil {
-            browser.keepPeek()
+            browser.keepPeek(beside: flags.contains(.option))
             return true
         }
 
@@ -1236,6 +1260,8 @@ struct ContentView: View {
                 return true
             }
             if browser.editingTab != nil { return true }
+            // "red" then Tab: Reddit, in the field (SiteSearch.swift).
+            if browser.fieldShowing, !flags.contains(.shift), browser.lockSiteOffer() { return true }
             if browser.fieldShowing, !browser.offers.isEmpty {
                 browser.walk(flags.contains(.shift) ? -1 : 1)
                 return true
@@ -1408,11 +1434,7 @@ struct ContentView: View {
         case "0":
             browser.resetZoom()
         case "w" where !shifted:
-            if browser.peekTab != nil {
-                browser.closePeek()
-            } else if let tab = browser.active {
-                browser.close(tab)
-            }
+            browser.closeFront()
         case "l" where !shifted:
             browser.edit()
         case "r" where !shifted:
@@ -1488,5 +1510,76 @@ struct SceneRoot: View {
         ContentView(browser: slot.browser)
             .id(ObjectIdentifier(slot.browser))
             .onAppear { Browsers.restoreOnce() }
+    }
+}
+
+/// A file being brought in, in the background (#380): its name, how far it
+/// has got, and Cancel — in the corner, in the quiet grey of everything
+/// else that floats over the page.
+private struct ImportProgress: View {
+    @ObservedObject var browser: Browser
+    let job: Browser.FileImportJob
+
+    private var fraction: CGFloat? {
+        guard let total = job.total, total > 0 else { return nil }
+        return min(1, CGFloat(job.completed) / CGFloat(total))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(job.filename)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Palette.ink)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text(job.message)
+                .font(.system(size: 12))
+                .foregroundStyle(Palette.muted)
+                .lineLimit(1)
+            bar
+            footer
+        }
+        .padding(14)
+        .frame(width: 250, alignment: .leading)
+        .background(Palette.ground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Palette.hairline, lineWidth: 1))
+        .shadow(color: .black.opacity(0.08), radius: 16, y: 5)
+        .padding(20)
+        .transition(.opacity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Importing \(job.filename), \(job.message)")
+    }
+
+    private var bar: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Palette.hairline)
+                if let fraction {
+                    Capsule().fill(Palette.ink.opacity(0.7)).frame(width: geo.size.width * fraction)
+                }
+            }
+        }
+        .frame(height: 3)
+    }
+
+    private var footer: some View {
+        HStack {
+            if let total = job.total, total > 0 {
+                Text("\(job.completed.formatted()) of \(total.formatted())")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Palette.muted)
+            }
+            Spacer(minLength: 0)
+            Button { browser.cancelFileImport() } label: {
+                Text(job.cancelling ? "Cancelling…" : "Cancel")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Palette.ink)
+                    .padding(.horizontal, 10)
+                    .frame(height: 22)
+                    .background(Palette.ink.opacity(0.07), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .disabled(job.cancelling)
+        }
     }
 }

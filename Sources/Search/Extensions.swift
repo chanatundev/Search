@@ -142,6 +142,11 @@ final class Extensions: NSObject, ObservableObject {
         // to a crawl and messages between an extension's popup and its
         // worker stop arriving. Not what anyone is testing.
         if Store.testing, !Store.measuring { views.preferences.inactiveSchedulingPolicy = .none }
+        // Screen recording: an extension's pages ask Search through this,
+        // which knows which page is asking (see ExtensionCapture).
+        views.userContentController.addScriptMessageHandler(ExtensionCapture.shared, contentWorld: .page, name: ExtensionCapture.channel)
+        Extensions.pages = views.userContentController
+        ExtensionCapture.mockDevices(views.preferences)
         configuration.webViewConfiguration = views
         controller = WKWebExtensionController(configuration: configuration)
         super.init()
@@ -463,7 +468,8 @@ final class Extensions: NSObject, ObservableObject {
         try? controller.unload(context)
         // What it kept going outside WebKit goes with it: its offscreen
         // page, and a Mac kept awake on its behalf.
-        ExtensionShims.offscreen[id] = nil
+        ExtensionOffscreen.close(for: id)
+        ExtensionCapture.shared.purge(id)
         if let held = ExtensionShims.awake.removeValue(forKey: id) { IOPMAssertionRelease(held) }
         // Its ports read as gone only once WebKit has had a turn.
         DispatchQueue.main.async { ExtensionNative.stopOrphans() }
@@ -711,6 +717,7 @@ final class Extensions: NSObject, ObservableObject {
 
     func remove(_ id: String) {
         unload(id)
+        ExtensionCapture.forget(id)
         errors[id] = nil
         Extensions.setSettings([:], for: id)
         Store.settings.removeObject(forKey: "extensions.granted.\(id)")
@@ -777,6 +784,7 @@ final class Extensions: NSObject, ObservableObject {
             Task { await load(installed[index]) }
         } else {
             unload(id)
+            ExtensionCapture.forget(id)
         }
     }
 
@@ -907,10 +915,15 @@ final class Extensions: NSObject, ObservableObject {
 
     /// Its manifest asks to talk to apps on this Mac ("nativeMessaging"),
     /// required or optional, which WebKit's own grant — given to all, see
-    /// `load` — doesn't say.
+    /// `load` — doesn't say. Nor does the manifest WebKit reads: Search
+    /// writes nativeMessaging into every one for its own line
+    /// (ExtensionShims.prepare), and notes it in .search-added, so what it
+    /// added there doesn't count as asked.
     static func asksForNative(_ context: WKWebExtensionContext) -> Bool {
-        context.webExtension.requestedPermissions.contains(.nativeMessaging)
-            || context.webExtension.optionalPermissions.contains(.nativeMessaging)
+        let folder = Extensions.folder(for: context.uniqueIdentifier)
+        let added = Set((try? JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent(".search-added")))) as? [String] ?? [])
+        let required = context.webExtension.requestedPermissions.contains(.nativeMessaging) && !added.contains("nativeMessaging")
+        return required || context.webExtension.optionalPermissions.contains(.nativeMessaging)
     }
 
     /// Whether this address is a page of an extension other than the one
@@ -931,6 +944,8 @@ final class Extensions: NSObject, ObservableObject {
         ("management", "See your other extensions"), ("notifications", "Show notifications"),
         ("sessions", "See your recently closed tabs"), ("topSites", "See your most visited sites"),
         ("readingList", "Read and change your reading list"), ("downloads.open", "Open files it downloads"),
+        ("desktopCapture", "Record your screen or a window, when you choose what to share"),
+        ("tabCapture", "Record a tab, when you ask it to"),
     ]
 
     /// What an extension wants, in words.
@@ -976,6 +991,16 @@ final class Extensions: NSObject, ObservableObject {
     /// permissions Search answers itself.
     func ask(more names: String, context: WKWebExtensionContext) async -> Bool {
         await ask("asks for more access", detail: names, context: context)
+    }
+
+    /// Recording the screen: asked once, naming the extension; the Mac's own
+    /// picker still asks what to share, every time.
+    func ask(capture context: WKWebExtensionContext) async -> Bool {
+        let name = context.webExtension.displayName ?? "An extension"
+        return await ask(
+            "“\(name)” wants to record your screen or a window.",
+            detail: "macOS will ask what to share. Search remembers your answer for \(name); Settings › Extensions takes it back.",
+            icon: context.webExtension.icon(for: CGSize(width: 64, height: 64)), yes: "Continue", no: "Don't Allow")
     }
 
     func ask(_ question: String, detail: String, context: WKWebExtensionContext) async -> Bool {
@@ -1061,11 +1086,19 @@ final class Extensions: NSObject, ObservableObject {
     /// for, even once WebKit no longer sees the click (see
     /// ExtensionShims, "permissions.afterClick").
     static var clicked: [String: Date] = [:]
+    /// The same, kept: permissions.request uses up `clicked`, and a
+    /// recording started from the button counts it for a minute (see
+    /// ExtensionCapture).
+    static var pressed: [String: Date] = [:]
 
     /// When you last clicked or typed in one of each extension's own pages —
     /// its popup, or a page of its in a tab. Real events only: a page's
     /// script can dispatch one, but it never reaches here.
     static var touched: [String: Date] = [:]
+    /// What every extension page's view shares, by which a tab knows it
+    /// shows one (see ExtensionPageDelegate).
+    static weak var pages: WKUserContentController?
+
     private static var touching: Any?
 
     static func watchTouches() {
@@ -1093,6 +1126,7 @@ final class Extensions: NSObject, ObservableObject {
     func press(_ id: String) {
         guard let context = contexts[id], !ExtensionPopup.shared.closes(id) else { return }
         Extensions.clicked[id] = Date()
+        Extensions.pressed[id] = Date()
         if let tab = activeAdapter { context.userGesturePerformed(in: tab) }
         // An extension that asked for its button to open its side panel.
         if ExtensionShims.panelOnClick.contains(id), context.action(for: activeAdapter)?.presentsPopup != true {
@@ -1132,13 +1166,6 @@ final class Extensions: NSObject, ObservableObject {
             return context.performCommand(for: event)
         }
         return false
-    }
-
-    /// Right-click items an extension added, for the page's menu.
-    func menuItems(for tab: Tab) -> [NSMenuItem] {
-        guard seen(tab) else { return [] }
-        let adapter = adapter(for: tab)
-        return contexts.values.flatMap { $0.menuItems(for: adapter) }
     }
 }
 

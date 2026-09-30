@@ -67,12 +67,18 @@ struct TabBar: View {
                         } else {
                             ScrollViewReader { reader in
                                 ScrollView(.horizontal, showsIndicators: false) {
+                                    // Every tab's width, worked out once for the run
+                                    // rather than by every tab: each working-out walks
+                                    // the whole row, group by group, and with 300 tabs
+                                    // asking one after another a redraw of the strip
+                                    // took over a second.
+                                    let each = width(in: geo.size.width)
                                     HStack(spacing: Metrics.tabGap) {
                                         if browser.prefs.usesTabGroups {
                                             let pins = browser.displayedTabs.filter { $0.pin != nil }
                                             ForEach(Array(pins.enumerated()), id: \.element.id) { index, tab in
                                                 topTab(tab, index: index, count: pins.count,
-                                                       group: nil, strip: geo.size.width)
+                                                       group: nil, strip: geo.size.width, each: each)
                                             }
                                             ForEach(browser.tabGroups) { group in
                                                 GroupHeading(browser: browser, group: group,
@@ -80,18 +86,18 @@ struct TabBar: View {
                                                 let members = browser.visibleTabs(in: group)
                                                 ForEach(Array(members.enumerated()), id: \.element.id) { index, tab in
                                                     topTab(tab, index: index, count: members.count,
-                                                           group: group.id, strip: geo.size.width)
+                                                           group: group.id, strip: geo.size.width, each: each)
                                                 }
                                             }
                                             let ungrouped = browser.displayedTabs.filter { $0.pin == nil && browser.group(of: $0) == nil }
                                             ForEach(Array(ungrouped.enumerated()), id: \.element.id) { index, tab in
                                                 topTab(tab, index: index, count: ungrouped.count,
-                                                       group: nil, strip: geo.size.width)
+                                                       group: nil, strip: geo.size.width, each: each)
                                             }
                                         } else {
                                             ForEach(Array(browser.displayedTabs.enumerated()), id: \.element.id) { index, tab in
                                                 topTab(tab, index: index, count: browser.displayedTabs.count,
-                                                       group: nil, strip: geo.size.width)
+                                                       group: nil, strip: geo.size.width, each: each)
                                             }
                                         }
                                     }
@@ -255,13 +261,15 @@ struct TabBar: View {
         }
     }
 
-    private func topTab(_ tab: Tab, index: Int, count: Int, group: UUID?, strip: CGFloat) -> some View {
+    /// `each`: every loose tab's width (see `width(in:)`), worked out once
+    /// for the run.
+    private func topTab(_ tab: Tab, index: Int, count: Int, group: UUID?, strip: CGFloat, each: CGFloat) -> some View {
         let pair = browser.prefs.splitView ? browser.split(for: tab) : nil
         let isPairRepresentative = pair?.left == tab.id
-        let itemWidth = isPairRepresentative ? splitItemWidth(base: width(in: strip)) : width(in: strip)
+        let itemWidth = isPairRepresentative ? splitItemWidth(base: each) : each
         let step = (tab.pin != nil ? Metrics.pinWidth : itemWidth) + Metrics.tabGap
         return rowItem(tab, in: browser.tabs, splits: browser.splits, activeID: browser.activeID,
-                       width: width(in: strip), room: strip - lights - leading - 12,
+                       width: each, room: strip - lights - leading - 12,
                        height: Metrics.strip, interactive: true, pill: pill)
             .background {
                 if browser.prefs.splitView && !isPairRepresentative {
@@ -629,6 +637,13 @@ private struct TabPill: View {
                         .font(.system(size: 9))
                         .foregroundStyle(colour.opacity(0.7))
                 }
+                if tab.recording {
+                    // An extension recording from this page (RecordingIndicator).
+                    Image(systemName: "record.circle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(colour.opacity(0.8))
+                        .help("Recording")
+                }
                 Text(tab.label)
                     .font(.system(size: 12.5))
                     .lineLimit(1)
@@ -857,6 +872,16 @@ struct TabAddressField: NSViewRepresentable {
         coordinator.unwatch()
     }
 
+    /// The width it is offered, never the address's own. Left to its own,
+    /// the field was as wide as the whole address and the row cut it off:
+    /// a field that never runs out of room never scrolls, so the caret went
+    /// on out of sight with ← and →, and so did what was typed at the end.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView field: NSTextField, context: Context) -> CGSize? {
+        let natural = field.intrinsicContentSize
+        guard let width = proposal.width, width.isFinite else { return nil }
+        return CGSize(width: max(0, width), height: proposal.height ?? natural.height)
+    }
+
     func updateNSView(_ field: NSTextField, context: Context) {
         let coordinator = context.coordinator
         coordinator.browser = browser
@@ -965,11 +990,27 @@ struct TabMenu: View {
                 }
             }
         }
+        let rows = browser.prefs.showsPinRows
         if tab.pin == nil {
             Button("Pin") { browser.pin(tab) }
                 .disabled(tab.isBlank || tab.shy)
+            if rows {
+                Button("Pin as Row") { browser.pin(tab, listed: true) }
+                    .disabled(tab.isBlank || tab.shy)
+            }
         } else {
-            Button("Change Letter") { browser.editLetter(tab) }
+            if rows {
+                Button(tab.listed ? "Show as Square" : "Show as Row") { browser.setListed(tab, !tab.listed) }
+            }
+            // A row wears its title, not its letter; and a click on it is
+            // the address, so the way home a square's double-click is
+            // (Browser.goHome) is here instead, while it has wandered.
+            if rows && tab.listed {
+                Button("Back to Pinned Page") { browser.goHome(tab) }
+                    .disabled(tab.home.map { Browser.samePage($0, tab.address) } ?? true)
+            } else {
+                Button("Change Letter") { browser.editLetter(tab) }
+            }
             Button("Unpin") { browser.unpin(tab) }
         }
         if browser.prefs.usesSpaces, !tab.bench,
@@ -1087,7 +1128,7 @@ struct TabMenu: View {
             .disabled(browser.tabs.count < 2)
         // ⌘⇧T, and the History menu's Recently Closed, where few think to
         // look for it: here too, where tabs are closed.
-        Button("Reopen Closed Tab") { browser.reopen() }
+        Button(browser.reopenTitle) { browser.reopen() }
             .disabled(browser.ghosts.isEmpty)
     }
 }

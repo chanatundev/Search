@@ -273,7 +273,8 @@ final class Bench {
             answered = true
             given(reply)
         }
-        let patience = (request["do"] as? String) == "wait" ? (request["seconds"] as? Double ?? 30) + 5 : 25
+        let patience = (request["do"] as? String) == "wait" ? (request["seconds"] as? Double ?? 30) + 5 :
+            (request["do"] as? String) == "import-file" ? (request["timeout"] as? Double ?? 120) : 25
         DispatchQueue.main.asyncAfter(deadline: .now() + patience) { answer(["error": "no answer within \(Int(patience)) s"]) }
         // --window N: the Nth window's browser, oldest first; the first
         // window's otherwise.
@@ -353,10 +354,13 @@ final class Bench {
             // Pin a tab, or unpin it with "off". Only on a SEARCH_PROBE run.
             guard Store.testing else { answer(["error": "pin only works on a --test run"]); return }
             guard let tab = find(request, in: browser) else { answer(missing(request)); return }
+            // "listed": pinned as a row, or an existing pin made a row
+            // (true) or a square (false).
             if request["off"] as? Bool == true { browser.unpin(tab) }
             else if request["home"] as? Bool == true { browser.goHome(tab) }
-            else { browser.pin(tab) }
-            answer(["pin": tab.pin ?? "", "pinned": browser.pinnedCount, "home": tab.home?.absoluteString ?? "",
+            else if let listed = request["listed"] as? Bool, tab.pin != nil { browser.setListed(tab, listed) }
+            else { browser.pin(tab, listed: request["listed"] as? Bool ?? false) }
+            answer(["pin": tab.pin ?? "", "listed": tab.listed, "pinned": browser.pinnedCount, "home": tab.home?.absoluteString ?? "",
                     "address": tab.address?.absoluteString ?? "", "editingLetter": browser.editingPin == tab.id])
 
         case "select":
@@ -891,6 +895,113 @@ final class Bench {
                 next(0)
             }
 
+        case "switcher":
+            // The ⌃Tab switcher as it stands: up or not, the pick, and where
+            // the panel and each card are in the window (top-left points).
+            let sw = browser.tabSwitcher
+            func short(_ id: Tab.ID?) -> String {
+                guard let id, let tab = browser.tabs.first(where: { $0.id == id }) else { return "" }
+                return Bench.short(tab)
+            }
+            func box(_ r: CGRect) -> [Double] { [r.minX, r.minY, r.width, r.height].map { Double($0) } }
+            answer([
+                "visible": sw.visible, "selected": short(sw.selectedID),
+                "candidates": sw.candidates.map { short($0) },
+                "panel": box(sw.panelFrame),
+                "cards": Dictionary(sw.cardFrames.map { (short($0.key), box($0.value)) }, uniquingKeysWith: { a, _ in a }),
+                "active": short(browser.activeID),
+            ])
+
+        case "recording":
+            // The recording pill (RecordingIndicator.swift): lines put up as
+            // ExtensionCapture would, a page lent to it, what it shows, and a
+            // picture of it drawn off every screen. A test run never puts
+            // the pill itself on a screen. Only on a SEARCH_PROBE run.
+            guard Store.testing else { answer(["error": "recording only works on a --test run"]); return }
+            let pill = RecordingIndicator.shared
+            func state(_ extra: [String: Any] = [:]) -> [String: Any] {
+                var out: [String: Any] = [
+                    "lines": pill.lines.map { [$0.id, $0.name, $0.what] },
+                    "recordingTabs": browser.tabs.filter(\.recording).map { Bench.short($0) },
+                    "onScreen": NSApp.windows.contains { $0 is NSPanel && $0.isVisible && $0.contentView?.subviews.contains { $0 is NSHostingView<PillView> } == true },
+                ]
+                out.merge(extra) { _, new in new }
+                return out
+            }
+            switch request["action"] as? String ?? "state" {
+            case "show":
+                let names = request["names"] as? [String] ?? ["Loom"]
+                let what = request["what"] as? String ?? "is recording your screen"
+                let page = find(request, in: browser)?.built
+                pill.update(names.map { RecordingLine(id: $0.lowercased(), name: $0, what: what) }, pages: page.map { [$0] } ?? [])
+                answer(state())
+            case "stop":
+                var stopped = ""
+                pill.onStop = { stopped = $0 }
+                pill.stop(request["name"] as? String ?? "")
+                answer(state(["stopped": stopped]))
+            case "clear": pill.update([]); answer(state())
+            case "host", "release":
+                guard let tab = find(request, in: browser), let web = tab.built else { answer(missing(request)); return }
+                // Where the page was before it was lent, to check it comes back there.
+                if request["action"] as? String == "host" {
+                    Bench.lentFrom[ObjectIdentifier(web)] = web.superview.map { WeakView($0) } ?? WeakView(nil)
+                    pill.host(web)
+                } else {
+                    pill.release(web)
+                }
+                let home = Bench.lentFrom[ObjectIdentifier(web)]?.view
+                answer(state(["hosted": pill.hosts(web), "backHome": web.superview === home]))
+            case "picture":
+                guard let path = request["path"] as? String, let rep = pill.picture(dark: request["dark"] as? Bool == true),
+                      let data = rep.representation(using: .png, properties: [:]) else { answer(["error": "no picture"]); return }
+                try? data.write(to: URL(fileURLWithPath: path))
+                answer(state(["saved": path]))
+            default: answer(state())
+            }
+
+        case "sitesearch":
+            // Search a site from the address field (SiteSearch.swift): what
+            // it offers and holds, Tab, ⌫ in an empty field, Esc, Return,
+            // and the sites it has learned. Only on a SEARCH_PROBE run.
+            guard Store.testing else { answer(["error": "sitesearch only works on a --test run"]); return }
+            func state(_ extra: [String: Any] = [:]) -> [String: Any] {
+                var out: [String: Any] = [
+                    "offer": browser.siteOffer?.name ?? "", "chip": browser.siteChip?.name ?? "",
+                    "typed": browser.typed, "offers": browser.offers.map { [$0.key, $0.url.absoluteString] },
+                    "editing": browser.editing, "learned": SiteSearch.learned.map { [$0.name, $0.host, $0.template] },
+                    "address": browser.active?.address?.absoluteString ?? "",
+                ]
+                out.merge(extra) { _, new in new }
+                return out
+            }
+            switch request["action"] as? String ?? "state" {
+            case "tab": answer(state(["took": browser.lockSiteOffer()]))
+            case "delete":
+                guard let field = Bench.addressField(in: (browser.window ?? Links.window)?.contentView),
+                      let editor = field.currentEditor() as? NSTextView else { answer(["error": "no field editor"]); return }
+                editor.doCommand(by: #selector(NSResponder.deleteBackward(_:)))
+                answer(state())
+            case "esc": browser.dismiss(); answer(state())
+            case "go":
+                browser.submit()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { answer(state(["pending": browser.active?.pending?.absoluteString ?? ""])) }
+            case "learn":
+                guard let page = (request["page"] as? String).flatMap(URL.init(string:)),
+                      let description = (request["description"] as? String).flatMap(URL.init(string:)) else {
+                    answer(["error": "sitesearch learn needs page and description"]); return
+                }
+                SiteSearch.learn(from: page, description: description)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { answer(state()) }
+            case "adopt":
+                // A learned site kept as learn keeps one, past the fetch: the
+                // name a description gives itself is never read.
+                SiteSearch.adopt(host: request["host"] as? String ?? "", template: request["template"] as? String ?? "")
+                answer(state())
+            case "forget": SiteSearch.forget(); answer(state())
+            default: answer(state())
+            }
+
         case "bookmark":
             // A bookmark picked from the button's list, through the same
             // call the list makes: how long until WebKit is loading it, and
@@ -914,6 +1025,31 @@ final class Bench {
                             "viewWasBuilt": built, "listStillOpen": browser.bookmarksOpen, "sameTab": browser.active?.id == tab.id])
                 }
             }
+
+        case "dropdown":
+            // The bookmark button's list, laid out off every screen, never in
+            // a popover: its height as it opens, the list's part of it, and
+            // how tall the tree is with every folder open.
+            let dropdown = BookmarksDropdown(browser: browser, bookmarks: browser.bookmarks)
+            let whole = NSHostingView(rootView: dropdown).fittingSize
+            let all = Set(Bookmarks.folders(browser.bookmarks.roots).map(\.node.id))
+            let outline = BookmarkOutline(bookmarks: browser.bookmarks, expanded: .constant(all), open: { _ in }, openInNewTab: { _ in })
+                .padding(6)
+                .frame(width: 280)
+            // As it opens, folders closed: what the list was once sized by.
+            let closed = BookmarkOutline(bookmarks: browser.bookmarks, expanded: .constant([]), open: { _ in }, openInNewTab: { _ in })
+                .padding(6)
+                .frame(width: 280)
+            // And as it opens now, with what opens with it.
+            let opening = BookmarksDropdown.opening(browser.bookmarks.roots)
+            let shown = BookmarkOutline(bookmarks: browser.bookmarks, expanded: .constant(opening), open: { _ in }, openInNewTab: { _ in })
+                .padding(6)
+                .frame(width: 280)
+            answer(["height": Double(whole.height), "width": Double(whole.width), "list": Double(dropdown.listHeight),
+                    "allOpen": Double(NSHostingView(rootView: outline).fittingSize.height),
+                    "closed": Double(NSHostingView(rootView: closed).fittingSize.height),
+                    "shown": Double(NSHostingView(rootView: shown).fittingSize.height),
+                    "opening": opening.count])
 
         case "import":
             // Another browser's passwords, bookmarks and history, brought in
@@ -965,7 +1101,7 @@ final class Bench {
             }
             if what.contains("spaces") {
                 if let sidebar = source.arcSidebar(profile: profile) {
-                    let (spaces, pins, tabs) = browser.takeArc(sidebar)
+                    let (spaces, pins, tabs) = browser.takeArc(sidebar, from: source, profile: profile)
                     ImportRecords.note(source.name, spaces: spaces, pinned: pins + tabs)
                     out["arc"] = ["spaces": spaces, "pins": pins, "tabs": tabs,
                                   "names": browser.spaces.map(\.name), "usesSpaces": browser.prefs.usesSpaces]
@@ -1009,10 +1145,31 @@ final class Bench {
             // File… buttons make after their chooser. Only on a SEARCH_PROBE run.
             guard Store.testing else { answer(["error": "import-file only works on a --test run"]); return }
             guard let path = request["path"] as? String else { answer(["error": "import-file needs a path"]); return }
-            let took = browser.takeFile(URL(fileURLWithPath: path))
-            answer(["said": took.said, "bookmarks": took.bookmarks, "already": took.already, "places": took.places,
-                    "kept": took.kept, "skipped": took.skipped, "total": browser.bookmarks.count,
-                    "top": browser.bookmarks.roots.map(\.title), "saved": browser.saved.count])
+            Task { @MainActor in
+                let took = await browser.takeFile(URL(fileURLWithPath: path))
+                answer(["said": took.said, "bookmarks": took.bookmarks, "already": took.already, "places": took.places,
+                        "kept": took.kept, "skipped": took.skipped, "cancelled": took.cancelled,
+                        "total": browser.bookmarks.count, "top": browser.bookmarks.roots.map(\.title), "saved": browser.saved.count])
+            }
+
+        case "import-file-start":
+            guard Store.testing else { answer(["error": "import-file only works on a --test run"]); return }
+            guard let path = request["path"] as? String else { answer(["error": "import-file needs a path"]); return }
+            guard browser.fileImport == nil else { answer(["error": "import already running"]); return }
+            Task { @MainActor in _ = await browser.takeFile(URL(fileURLWithPath: path)) }
+            answer(["started": true])
+
+        case "import-file-status":
+            guard Store.testing else { answer(["error": "import-file only works on a --test run"]); return }
+            if let job = browser.fileImport {
+                answer(["running": true, "filename": job.filename, "message": job.message,
+                        "completed": job.completed, "total": job.total ?? -1, "cancelling": job.cancelling])
+            } else { answer(["running": false]) }
+
+        case "import-file-cancel":
+            guard Store.testing else { answer(["error": "import-file only works on a --test run"]); return }
+            browser.cancelFileImport()
+            answer(["cancelling": browser.fileImport?.cancelling ?? false])
 
         case "menu":
             // The Bookmarks menu as it is about to open: the menu bar
@@ -1243,6 +1400,12 @@ final class Bench {
                 answer(["error": "ai mock URL | key PROVIDER KEY | ask PROVIDER MODEL TEXT | read ID | check TEXT"])
             }
 
+        case "notifications":
+            // What a test run would have posted, and every site's answer.
+            guard Store.testing else { answer(["error": "notifications only works on a --test run"]); return }
+            answer(["recorded": SiteNotifications.shared.recorded, "choices": SiteNotifications.choices,
+                    "asking": browser.asking.map { "\($0.host) \($0.wants)" } ?? ""])
+
         case "answer":
             // The card of a page asking for the camera, microphone or your
             // location: once, always or no. Only on a SEARCH_PROBE run.
@@ -1370,6 +1533,9 @@ final class Bench {
             } else if request["fold"] as? Bool == true {
                 guard let group else { answer(["error": "no group “\(named)”"]); return }
                 browser.toggleTabGroup(group.id)
+            } else if request["close"] as? Bool == true {
+                guard let group else { answer(["error": "no group “\(named)”"]); return }
+                browser.closeTabGroup(group.id)
             }
             answer(["on": browser.prefs.usesTabGroups, "groups": browser.tabGroups.map { group in
                 ["id": String(group.id.uuidString.prefix(8)).lowercased(), "name": group.name, "collapsed": group.collapsed,
@@ -2167,7 +2333,9 @@ final class Bench {
             if let on = request["peek"] as? Bool { browser.peeking = on }
             // A peek at a link (Peek.swift): its two buttons.
             if let what = request["peeklink"] as? String {
-                if what == "keep" { browser.keepPeek() } else { browser.closePeek() }
+                if what == "keep" { browser.keepPeek() }
+                else if what == "beside" { browser.keepPeek(beside: true) }
+                else { browser.closePeek() }
             }
             // The address of the tab on screen being edited in the tab, with
             // this typed, and that edit let go of by a click elsewhere.
@@ -2179,7 +2347,7 @@ final class Bench {
             if #available(macOS 15.4, *), let on = request["extensions"] as? Bool { Extensions.shared.menuOpen = on }
             answer(["ok": true])
 
-        case "extensions", "ext-add", "ext-folder", "ext-press", "ext-remove", "ext-reload", "ext-page", "ext-popup", "ext-menu", "ext-pin", "ext-shot", "ext-answer", "ext-enable":
+        case "extensions", "ext-add", "ext-folder", "ext-press", "ext-remove", "ext-reload", "ext-page", "ext-popup", "ext-menu", "ext-pin", "ext-shot", "ext-answer", "ext-enable", "capture", "capture-stop":
             guard #available(macOS 15.4, *) else {
                 answer(["error": "extensions need macOS 15.4"])
                 return
@@ -2188,7 +2356,7 @@ final class Bench {
 
         default:
             answer(["error": "unknown command “\(verb)”", "commands": [
-                "tabs", "open", "go", "close", "wait", "sleep", "select", "text", "eval", "click", "type", "submit", "shot", "probe", "key", "resize", "hit", "film", "float", "window", "pages", "picture", "place", "group", "tospace", "field", "bookmark", "menu", "keyeq", "fill", "pin", "middle", "windows", "quit", "towindow", "news", "pull", "space", "split", "strip", "column", "fold", "consent", "update", "site", "little", "ui", "import", "import-preview", "import-file", "accounts", "find", "answer", "visible", "ai",
+                "tabs", "open", "go", "close", "wait", "sleep", "select", "text", "eval", "click", "type", "submit", "shot", "probe", "key", "resize", "hit", "film", "float", "window", "pages", "picture", "place", "group", "tospace", "field", "bookmark", "menu", "keyeq", "fill", "pin", "middle", "windows", "quit", "towindow", "news", "pull", "space", "split", "strip", "column", "fold", "consent", "update", "site", "little", "ui", "import", "import-preview", "import-file", "import-file-start", "import-file-status", "import-file-cancel", "accounts", "find", "answer", "visible", "ai", "notifications",
             ]])
         }
     }
@@ -2196,6 +2364,13 @@ final class Bench {
     /// A small model bridge for offline split regressions. The browser model is
     /// the system under test; this command is deliberately unavailable in the
     /// browser somebody is using because its actions move and close tabs.
+    /// Where a page lent to the recording pill was before, for `recording`.
+    static var lentFrom: [ObjectIdentifier: WeakView] = [:]
+    final class WeakView {
+        weak var view: NSView?
+        init(_ view: NSView?) { self.view = view }
+    }
+
     /// The view a `split mouse … to: view` press landed on, for the rest of it.
     private weak var pressed: NSView?
 
@@ -2404,6 +2579,11 @@ final class Bench {
             browser.dropTabIntoStrip(page, before: tab("before"))
             reply()
 
+        case "clear":
+            // The line's Clear, with the pinned rows on (Browser.clearTabs).
+            browser.clearTabs()
+            reply()
+
         case "space":
             switch request["spaceAction"] as? String {
             case "new": browser.addSpace(named: request["name"] as? String ?? "Split test")
@@ -2528,6 +2708,11 @@ final class Bench {
             "needle": browser.needle,
             "findStatus": browser.findStatus ?? "",
             "pins": browser.tabs.filter { $0.pin != nil }.map { Bench.short($0) },
+            // Every pin kept as a row, drawn so or not (Tab.listed).
+            "listed": browser.tabs.filter { $0.pin != nil && $0.listed }.map { Bench.short($0) },
+            // What ⇧⌘T would bring back, as its menu item says it.
+            "reopenTitle": browser.reopenTitle,
+            "ghosts": browser.ghosts.count,
             // What pages of the pair asked, oldest first (see PaneQuestion).
             "questions": browser.paneQuestions.map { question in
                 ["tab": short(question.tab), "host": question.host, "message": question.message,
@@ -2590,6 +2775,14 @@ final class Bench {
             guard let id = request["id"] as? String else { answer(["error": "ext-enable needs an id"]); return }
             extensions.setEnabled(id, request["on"] as? Bool ?? true)
             answer(["enabled": request["on"] as? Bool ?? true])
+        case "capture":
+            // Extensions' screen recording: ids given, what is recording, who
+            // may, and the last request with its answer.
+            answer(ExtensionCapture.shared.state)
+        case "capture-stop":
+            guard let id = request["id"] as? String else { answer(["error": "capture-stop needs an id"]); return }
+            ExtensionCapture.shared.stop(id)
+            answer(["stopping": id])
         case "ext-answer":
             // In a test run: answer every extension's question yes or no
             // without asking, or go back to asking.
