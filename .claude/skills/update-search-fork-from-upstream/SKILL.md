@@ -1,6 +1,6 @@
 ---
 name: update-search-fork-from-upstream
-description: Use when updating, syncing, or pulling the Search browser fork (chanatundev/Search) up to date with upstream Search (driceroland/Search), resolving merge conflicts between the fork and upstream, or when the fork is missing upstream Search fixes, features, or versions.
+description: Use when updating, syncing, or pulling the Search browser fork (chanatundev/Search) up to date with upstream Search (driceroland/Search), resolving merge conflicts between the fork and upstream, or when the fork is missing upstream Search fixes, features, or versions, including when the installed fork shows a "Search X is out" update prompt.
 ---
 
 # Update the Search fork from upstream
@@ -9,6 +9,11 @@ description: Use when updating, syncing, or pulling the Search browser fork (cha
 browser. The fork's history contains upstream. Update it by **merging the tip of
 `upstream/main`**. Previous syncs went past the latest release tag, so follow
 `main`, not tags. Never rebase fork commits and never force-push `origin`.
+
+The installed fork is ad-hoc signed, so its updater can't install upstream
+releases by itself. Instead, a "Search X is out" prompt appears, and that prompt is
+the cue to run this sync. Never choose "Download Update": it installs Office
+Commun's build over the fork.
 
 ## 1. Preflight
 
