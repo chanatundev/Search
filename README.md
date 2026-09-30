@@ -2,6 +2,18 @@
 
 This fork adds the features below to [upstream Search](https://github.com/driceroland/Search). See upstream for the base browser, its setup, and general project documentation.
 
+## Fork logo and local updates
+
+[Icon/search-favicon-c.png](Icon/search-favicon-c.png) is the canonical fork logo.
+`./build.sh release` generates all `.icns` sizes from it and bundles the same
+artwork for the welcome and About screens. The fork uses this flat icon instead
+of upstream's Icon Composer catalog; macOS applies its own Dark and Tinted styling.
+
+To rebuild, install into `/Applications/Search.app`, and relaunch locally, run
+`~/code/scripts/update-apps/update-search.sh`. It builds a temporary snapshot,
+preserves iCloud duplicate files in the checkout, verifies the staged signature,
+and restores the previous app if installation or launch fails.
+
 ## Command Palette
 
 `⌘E` opens a searchable palette of browser actions. Use `↑` and `↓`, then `Return`, or click an action; `esc` closes it. The palette includes:

@@ -290,14 +290,12 @@ struct WelcomePanel: View {
 
     // MARK: - pieces
 
-    /// The mark alone, at whatever height the page wants — no plate behind
-    /// it, the same as everywhere else it's drawn.
+    /// The fork logo, at whatever height the page wants.
     private struct Plate: View {
         let size: CGFloat
         var body: some View {
             Logomark()
-                .fill(Palette.ink, style: FillStyle(eoFill: true))
-                .aspectRatio(Logomark.canvas.width / Logomark.canvas.height, contentMode: .fit)
+                .aspectRatio(1, contentMode: .fit)
                 .frame(height: size * 0.56)
         }
     }

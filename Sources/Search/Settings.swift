@@ -597,8 +597,7 @@ struct SettingsPanel: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 14) {
                 Logomark()
-                    .fill(Palette.ink, style: FillStyle(eoFill: true))
-                    .aspectRatio(Logomark.canvas.width / Logomark.canvas.height, contentMode: .fit)
+                    .aspectRatio(1, contentMode: .fit)
                     .frame(height: 34)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Search")
