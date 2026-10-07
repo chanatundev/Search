@@ -414,6 +414,10 @@ struct SettingsPanel: View {
                 Segmented(options: Glyph.allCases.map { ($0, $0.title) }, selection: $prefs.glyph)
             }
             Rule()
+            Line("New tab screen", "What appears when you open a new tab") {
+                Segmented(options: NewTabScreen.allCases.map { ($0, $0.title) }, selection: $prefs.newTabScreen)
+            }
+            Rule()
             Line("Show the bookmarks bar", "Your bookmarks in a row above the page, folders opening as menus. It folds away with the tabs") {
                 Switch(on: $prefs.bookmarksBar)
             }

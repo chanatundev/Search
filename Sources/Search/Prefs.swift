@@ -86,6 +86,10 @@ final class Preferences: ObservableObject {
     @Published var glyph: Glyph {
         didSet { store.set(glyph.rawValue, forKey: "glyph") }
     }
+    /// Which screen is shown on a blank new tab.
+    @Published var newTabScreen: NewTabScreen {
+        didSet { store.set(newTabScreen.rawValue, forKey: "newtab.screen") }
+    }
     @Published var engine: Engine {
         didSet { store.set(engine.rawValue, forKey: "search.engine") }
     }
@@ -377,6 +381,7 @@ final class Preferences: ObservableObject {
         let width = store.object(forKey: "sidebar.width") as? Double ?? Double(Metrics.side)
         sideWidth = min(Metrics.sideMax, max(Metrics.sideMin, CGFloat(width)))
         glyph = store.string(forKey: "glyph").flatMap(Glyph.init) ?? .letters
+        newTabScreen = store.string(forKey: "newtab.screen").flatMap(NewTabScreen.init) ?? .minimal
         engine = store.string(forKey: "search.engine").flatMap(Engine.init) ?? .standard
         customEngine = store.string(forKey: "search.custom") ?? ""
         keywords = store.data(forKey: "search.keywords")

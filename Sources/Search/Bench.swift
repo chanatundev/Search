@@ -930,6 +930,14 @@ final class Bench {
                 "active": browser.spaceID.uuidString,
             ])
 
+        case "newTabScreen":
+            if let set = request["set"] as? String, let screen = NewTabScreen(rawValue: set) {
+                browser.prefs.newTabScreen = screen
+                answer(["ok": true, "screen": screen.rawValue])
+            } else {
+                answer(["screen": browser.prefs.newTabScreen.rawValue])
+            }
+
         case "switcher":
             // The ⌃Tab switcher as it stands: up or not, the pick, and where
             // the panel and each card are in the window (top-left points).

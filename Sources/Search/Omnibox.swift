@@ -43,33 +43,59 @@ struct Omnibox: View {
                     .transition(.opacity)
             }
 
-            field
-                .frame(width: width)
-            // The list hangs below the field rather than stacking with it,
-            // so a list that grows never lifts the field out from under
-            // what is being typed.
-            .overlay(alignment: .top) {
-                // Present or gone, not always-on-and-hidden: the list keeps
-                // the appear and disappear it had, and the overlay is what
-                // keeps that from moving the field.
-                if !browser.offers.isEmpty || browser.siteOffer != nil {
-                    list
-                        .frame(width: width)
-                        .offset(y: Self.fieldHeight + 8)
+            VStack(spacing: 18) {
+                if !over, !fitted, browser.prefs.newTabScreen == .focus, browser.typed.isEmpty {
+                    FocusHeader()
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                }
+
+                field
+                    .frame(width: width)
+                // The list hangs below the field rather than stacking with it,
+                // so a list that grows never lifts the field out from under
+                // what is being typed.
+                .overlay(alignment: .top) {
+                    // Present or gone, not always-on-and-hidden: the list keeps
+                    // the appear and disappear it had, and the overlay is what
+                    // keeps that from moving the field.
+                    if !browser.offers.isEmpty || browser.siteOffer != nil {
+                        list
+                            .frame(width: width)
+                            .offset(y: Self.fieldHeight + 8)
+                    }
+                }
+
+                if !over, !fitted, browser.typed.isEmpty, browser.offers.isEmpty {
+                    switch browser.prefs.newTabScreen {
+                    case .bookmarks:
+                        NewTabBookmarksView(browser: browser)
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    case .shortcuts:
+                        NewTabShortcutsView(browser: browser)
+                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    case .minimal, .focus:
+                        EmptyView()
+                    }
                 }
             }
             // Lifted a little above centre: dead centre reads as low,
             // because the strip at the top isn't part of what the eye is
             // measuring.
-            .padding(.bottom, 60)
-            // The list's arrival and its leaving are animated from here,
-            // briefly: nothing that changes the suggestions does it inside
-            // an animation of its own. Its rows follow what was typed or
-            // pasted at once — sliding into place on a spring between
-            // keystrokes, they trailed behind the field.
-            .animation(Motion.quick, value: browser.offers.isEmpty && browser.siteOffer == nil)
-            .animation(Motion.settle, value: refused)
+            .padding(.bottom, over ? 60 : (browser.prefs.newTabScreen == .focus ? 20 : 60))
+            .animation(Motion.quick, value: browser.prefs.newTabScreen)
+            .animation(Motion.quick, value: browser.typed.isEmpty)
+
+            if !over, !fitted, browser.typed.isEmpty, browser.offers.isEmpty {
+                VStack {
+                    Spacer()
+                    NewTabSwitcher(prefs: browser.prefs)
+                        .padding(.bottom, 24)
+                }
+                .transition(.opacity)
+            }
         }
+        .animation(Motion.quick, value: browser.offers.isEmpty && browser.siteOffer == nil)
+        .animation(Motion.settle, value: refused)
     }
 
     private var field: some View {
