@@ -161,12 +161,14 @@ final class Browser: NSObject, ObservableObject {
             if prefs.splitView, let pair = splits.first(where: { $0.contains(old) }) {
                 if let id = activeID, pair.contains(id) { return }
                 tabSwitcher.cancel()
+                spaceSwitcher.cancel()
                 if let first = tabs.first(where: { $0.id == pair.left }) {
                     tabSwitcher.left(first, alive: Set((tabs + parkedTabs).map(\.id)))
                 }
                 return
             }
             tabSwitcher.cancel()
+            spaceSwitcher.cancel()
             if let left { tabSwitcher.left(left, alive: Set((tabs + parkedTabs).map(\.id))) }
         }
     }
@@ -214,6 +216,7 @@ final class Browser: NSObject, ObservableObject {
     }
 
     let tabSwitcher = TabSwitcher()
+    let spaceSwitcher = SpaceSwitcher()
 
     /// The tab whose page is currently out in the little window. Nothing
     /// floating means no window: the two are checked against each other rather
@@ -3348,6 +3351,29 @@ final class Browser: NSObject, ObservableObject {
         guard let target = tabSwitcher.finish(picking: id),
               let tab = tabs.first(where: { $0.id == target }) else { return }
         select(entry(tab))
+    }
+
+    func switchSpaces(backwards: Bool = false) {
+        guard !spaces.isEmpty else { return }
+        preloadSpaces()
+        spaceSwitcher.step(spaces: spaces, current: spaceID, backwards: backwards)
+    }
+
+    func clickSpaceSwitcher(at point: CGPoint) -> Bool {
+        guard spaceSwitcher.visible else { return false }
+        guard spaceSwitcher.panelFrame.contains(point) else {
+            spaceSwitcher.cancel()
+            return true
+        }
+        if let id = spaceSwitcher.card(at: point) { commitSpaceSwitch(picking: id) }
+        return true
+    }
+
+    func commitSpaceSwitch(picking id: UUID? = nil) {
+        guard let target = spaceSwitcher.finish(picking: id) else { return }
+        if target != spaceID {
+            switchSpace(to: target)
+        }
     }
 
     /// A link opened from a page lands next to the page it came from, not at

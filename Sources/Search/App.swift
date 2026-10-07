@@ -626,6 +626,7 @@ struct ContentView: View {
             .overlay { field }
             .overlay { panels }
             .overlay { TabSwitcherOverlay(browser: browser, switcher: browser.tabSwitcher) }
+            .overlay { SpaceSwitcherOverlay(browser: browser, switcher: browser.spaceSwitcher) }
             .overlay(alignment: .topTrailing) {
                 if let job = browser.fileImport { ImportProgress(browser: browser, job: job) }
             }
@@ -648,6 +649,7 @@ struct ContentView: View {
             // go on in their place until the app comes back.
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
                 browser.tabSwitcher.cancel()
+                browser.spaceSwitcher.cancel()
                 measureLights()
                 resting?.isHidden = false
                 // Only the window you were in, or every window's video would come.
@@ -657,7 +659,10 @@ struct ContentView: View {
                 if let window, (note.object as? NSWindow) === window { Browsers.becameKey(browser) }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { note in
-                if let window, (note.object as? NSWindow) === window { browser.tabSwitcher.cancel() }
+                if let window, (note.object as? NSWindow) === window {
+                    browser.tabSwitcher.cancel()
+                    browser.spaceSwitcher.cancel()
+                }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.willEnterFullScreenNotification)) { note in
                 if let window, (note.object as? NSWindow) === window { browser.fullScreen = true }
@@ -1012,7 +1017,9 @@ struct ContentView: View {
                 guard let window, event.window === window, let height = window.contentView?.bounds.height
                 else { return event }
                 let at = event.locationInWindow
-                return browser.clickTabSwitcher(at: CGPoint(x: at.x, y: height - at.y)) ? nil : event
+                let point = CGPoint(x: at.x, y: height - at.y)
+                if browser.clickSpaceSwitcher(at: point) { return nil }
+                return browser.clickTabSwitcher(at: point) ? nil : event
             }
             // Every window has a monitor, and every monitor hears every key:
             // each takes only its own window's, and the one in front takes
@@ -1020,6 +1027,10 @@ struct ContentView: View {
             // window).
             guard mine(event) else { return event }
             guard event.type == .keyDown else {
+                // ⌃ let go of switches to the space the switcher is on.
+                if browser.spaceSwitcher.active, !event.modifierFlags.contains(.control) {
+                    browser.commitSpaceSwitch()
+                }
                 // ⌃ let go of switches to the tab the switcher is on.
                 if browser.tabSwitcher.active, !event.modifierFlags.contains(.control) {
                     browser.commitTabSwitch()
@@ -1150,9 +1161,46 @@ struct ContentView: View {
             if event.keyCode == 53 { return true }
         }
 
+        let isGrave = event.keyCode == 50
+            || event.charactersIgnoringModifiers == "`"
+            || event.charactersIgnoringModifiers == "~"
+            || event.characters(byApplyingModifiers: []) == "`"
+        let controlGrave = isGrave && flags.contains(.control)
+            && flags.isDisjoint(with: [.command, .option])
+
+        if browser.spaceSwitcher.active, !controlGrave {
+            if flags.contains(.control), flags.isDisjoint(with: [.command, .option]) {
+                let direction: Int? = switch event.keyCode {
+                case 123, 126: -1
+                case 124, 125: 1
+                default: nil
+                }
+                if let direction {
+                    browser.spaceSwitcher.step(spaces: browser.spaces, current: browser.spaceID, backwards: direction == -1)
+                    return true
+                }
+            }
+            browser.spaceSwitcher.cancel()
+            if event.keyCode == 53 { return true }
+        }
+
+        if controlGrave {
+            if canSwitchTabs(event) {
+                browser.tabSwitcher.cancel()
+                if !event.isARepeat {
+                    browser.switchSpaces(backwards: flags.contains(.shift))
+                }
+                return true
+            }
+        }
+
         // Escape puts the page back. On a blank tab there is no page to put
         // back, so it belongs to whatever else wants it.
         if event.keyCode == 53 {
+            if browser.spaceSwitcher.active {
+                browser.spaceSwitcher.cancel()
+                return true
+            }
             if browser.commandPalette {
                 browser.commandPalette = false
                 return true
@@ -1251,6 +1299,7 @@ struct ContentView: View {
         // there is to move through, and Return takes whatever the walk landed on.
         if event.keyCode == 48, !flags.contains(.command), !flags.contains(.option) {
             if flags.contains(.control) {
+                browser.spaceSwitcher.cancel()
                 if canSwitchTabs(event) {
                     // A Tab held down doesn't race through them.
                     if !event.isARepeat { browser.switchTabs(backwards: flags.contains(.shift)) }

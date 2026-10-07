@@ -714,6 +714,29 @@ final class Bench {
                 answer(["active": browser.active.map { String($0.id.uuidString.prefix(8)).lowercased() } ?? ""])
             }
 
+        case "flags":
+            guard Store.testing else { answer(["error": "flags only works on a --test run"]); return }
+            var flags: NSEvent.ModifierFlags = []
+            for name in request["mods"] as? [String] ?? [] {
+                switch name {
+                case "cmd": flags.insert(.command)
+                case "shift": flags.insert(.shift)
+                case "ctrl": flags.insert(.control)
+                case "opt": flags.insert(.option)
+                default: break
+                }
+            }
+            if let event = NSEvent.keyEvent(
+                with: .flagsChanged, location: .zero, modifierFlags: flags,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: (browser.window ?? Links.window)?.windowNumber ?? 0, context: nil,
+                characters: "", charactersIgnoringModifiers: "",
+                isARepeat: false, keyCode: 0
+            ) {
+                NSApp.postEvent(event, atStart: false)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { answer(["ok": true]) }
+
         case "key":
             // Keys pressed on a tab, as real key events handed to its view —
             // for what the page does with them, and what comes back unused.
@@ -894,6 +917,18 @@ final class Bench {
                 }
                 next(0)
             }
+
+        case "spaceSwitcher":
+            let sw = browser.spaceSwitcher
+            func box(_ r: CGRect) -> [Double] { [r.minX, r.minY, r.width, r.height].map { Double($0) } }
+            answer([
+                "visible": sw.visible,
+                "selected": sw.selectedID?.uuidString ?? "",
+                "candidates": sw.candidates.map(\.uuidString),
+                "panel": box(sw.panelFrame),
+                "cards": Dictionary(sw.cardFrames.map { ($0.key.uuidString, box($0.value)) }, uniquingKeysWith: { a, _ in a }),
+                "active": browser.spaceID.uuidString,
+            ])
 
         case "switcher":
             // The ⌃Tab switcher as it stands: up or not, the pick, and where

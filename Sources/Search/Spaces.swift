@@ -180,13 +180,15 @@ extension Browser {
         return URL(fileURLWithPath: path)
     }
 
-    /// ⌃1–⌃9, and the menu on the space's dot.
+    /// ⌃1–⌃9, ⌃`, and the menu on the space's dot.
     func switchSpace(to id: UUID) {
+        if !prefs.usesSpaces && spaces.count > 1 { prefs.usesSpaces = true }
         guard prefs.usesSpaces else { return }
         enter(id)
     }
 
     private func enter(_ id: UUID) {
+        spaceSwitcher.cancel()
         guard id != spaceID, let to = spaces.firstIndex(where: { $0.id == id }) else { return }
         // Which way the icon at the foot turns over: the way the spaces lie.
         if !makingSpace { spaceStep = to > (spaces.firstIndex { $0.id == spaceID } ?? 0) ? 1 : -1 }
