@@ -2581,13 +2581,19 @@ final class Browser: NSObject, ObservableObject {
             rememberSession()
             return
         }
-        // Never two empty tabs. One already open anywhere in the row comes to
-        // its end and is the one opened, with whatever was typed into it and
+        // Never two empty tabs. One already open anywhere in the row comes
+        // after the currently open tab and is the one opened, with whatever was typed into it and
         // never gone to cleared away — a row of identical empty tabs is what
         // pressing ⌘T twice, or holding it, used to leave.
         if let blank = tabs.last(where: { $0.isBlank && !$0.bench && !$0.shy && split(for: $0) == nil }) {
-            if let end = tabs.indices.last, tabs.firstIndex(where: { $0.id == blank.id }) != end {
-                move(blank, to: end)
+            if blank.id != activeID, let from = tabs.firstIndex(where: { $0.id == blank.id }) {
+                let previousGroup = blank.groupID
+                tabs.remove(at: from)
+                if prefs.usesTabGroups, let active, !active.shy, !active.bench {
+                    blank.groupID = active.groupID
+                }
+                tabs.insert(blank, at: safeInsertionIndex(placeForNew()))
+                removeEmptyGroup(previousGroup)
             }
             if activeID != blank.id { leaving() }
             activeID = blank.id
@@ -2600,7 +2606,10 @@ final class Browser: NSObject, ObservableObject {
             return
         }
         let tab = Tab(configuration: Web.configuration(space: spaceID))
-        adopt(tab)
+        if prefs.usesTabGroups, let active, !active.shy, !active.bench {
+            tab.groupID = active.groupID
+        }
+        adopt(tab, at: placeForNew())
         leaving()
         activeID = tab.id
         summoning = false
@@ -3541,10 +3550,11 @@ final class Browser: NSObject, ObservableObject {
     /// history, and no place in tomorrow's session.
     func newShyTab() {
         // Never two empty private tabs, as ⌘T never makes two empty ones:
-        // one already open comes to the end of the row and is the one opened.
+        // one already open comes after the currently open tab and is the one opened.
         if let blank = tabs.last(where: { $0.isBlank && $0.shy && !$0.bench }) {
-            if let end = tabs.indices.last, tabs.firstIndex(where: { $0.id == blank.id }) != end {
-                move(blank, to: end)
+            if blank.id != activeID, let from = tabs.firstIndex(where: { $0.id == blank.id }) {
+                tabs.remove(at: from)
+                tabs.insert(blank, at: safeInsertionIndex(placeForNew()))
             }
             if activeID != blank.id { leaving() }
             activeID = blank.id
@@ -3556,7 +3566,7 @@ final class Browser: NSObject, ObservableObject {
             return
         }
         let tab = Tab(shy: true)
-        adopt(tab)
+        adopt(tab, at: placeForNew())
         leaving()
         activeID = tab.id
         summoning = false
@@ -3731,9 +3741,13 @@ final class Browser: NSObject, ObservableObject {
         return index + 1
     }
 
-    private func adopt(_ tab: Tab) {
+    private func adopt(_ tab: Tab, at index: Int? = nil) {
         prepare(tab)
-        tabs.append(tab)
+        if let index {
+            tabs.insert(tab, at: safeInsertionIndex(index))
+        } else {
+            tabs.append(tab)
+        }
         if activeID == nil { activeID = tab.id }
     }
 
