@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test for Multiple New Tab Screens."""
+"""Test for Multiple New Tab Screens and Multiple New Tab Tabs."""
 import sys
 import time
 from pathlib import Path
@@ -57,6 +57,25 @@ def main():
 
         current = get_screen()
         t.ok("get_screen reports minimal", current.get("screen") == "minimal", current)
+
+        # Test multiple 'New Tab' tabs:
+        # Initial state should have 1 tab (the default blank tab)
+        st = sv.sp("state")
+        t.ok("starts with 1 blank tab", len(st["tabs"]) == 1 and st["tabs"][0]["blank"], st["tabs"])
+
+        # Press new tab three times
+        sv.sp("newTab")
+        time.sleep(0.2)
+        sv.sp("newTab")
+        time.sleep(0.2)
+        sv.sp("newTab")
+        time.sleep(0.2)
+
+        st = sv.sp("state")
+        blank_tabs = [x for x in st["tabs"] if x["blank"]]
+        t.ok("pressing new tab three times created multiple blank tabs (total 4)", len(blank_tabs) == 4, len(blank_tabs))
+        t.ok("all blank tabs have New Tab title", all(x["title"] == "" or x.get("label") == "New Tab" for x in blank_tabs), blank_tabs)
+        t.ok("active tab is the latest new tab", st["activeID"] == st["tabs"][-1]["id"], (st["activeID"], st["tabs"]))
 
     finally:
         t.done()

@@ -2581,30 +2581,7 @@ final class Browser: NSObject, ObservableObject {
             rememberSession()
             return
         }
-        // Never two empty tabs. One already open anywhere in the row comes
-        // after the currently open tab and is the one opened, with whatever was typed into it and
-        // never gone to cleared away — a row of identical empty tabs is what
-        // pressing ⌘T twice, or holding it, used to leave.
-        if let blank = tabs.last(where: { $0.isBlank && !$0.bench && !$0.shy && split(for: $0) == nil }) {
-            if blank.id != activeID, let from = tabs.firstIndex(where: { $0.id == blank.id }) {
-                let previousGroup = blank.groupID
-                tabs.remove(at: from)
-                if prefs.usesTabGroups, let active, !active.shy, !active.bench {
-                    blank.groupID = active.groupID
-                }
-                tabs.insert(blank, at: safeInsertionIndex(placeForNew()))
-                removeEmptyGroup(previousGroup)
-            }
-            if activeID != blank.id { leaving() }
-            activeID = blank.id
-            summoning = false
-            typed = ""
-            blank.draft = ""
-            editing = false
-            focusRequest += 1
-            rememberSession()
-            return
-        }
+        if let active, active.isBlank { active.draft = typed }
         let tab = Tab(configuration: Web.configuration(space: spaceID))
         if prefs.usesTabGroups, let active, !active.shy, !active.bench {
             tab.groupID = active.groupID
@@ -2830,7 +2807,11 @@ final class Browser: NSObject, ObservableObject {
         // It may still reuse one of yours, in a group: that one is yours to
         // keep, and only a tab Clear made is taken away again by the undo.
         let had = Set(tabs.map(\.id))
-        newTab()
+        if let existing = tabs.last(where: { $0.isBlank && !$0.bench && !$0.shy && split(for: $0) == nil }) {
+            select(existing)
+        } else {
+            newTab()
+        }
         lastClear = (batch, activeID.flatMap { had.contains($0) ? nil : $0 })
         for tab in onScreen where tab.id != activeID { close(tab) }
     }
@@ -3549,22 +3530,7 @@ final class Browser: NSObject, ObservableObject {
     /// ⌘⇧N. A tab that keeps nothing — its own cookies, its own sign-ins, no
     /// history, and no place in tomorrow's session.
     func newShyTab() {
-        // Never two empty private tabs, as ⌘T never makes two empty ones:
-        // one already open comes after the currently open tab and is the one opened.
-        if let blank = tabs.last(where: { $0.isBlank && $0.shy && !$0.bench }) {
-            if blank.id != activeID, let from = tabs.firstIndex(where: { $0.id == blank.id }) {
-                tabs.remove(at: from)
-                tabs.insert(blank, at: safeInsertionIndex(placeForNew()))
-            }
-            if activeID != blank.id { leaving() }
-            activeID = blank.id
-            summoning = false
-            typed = ""
-            blank.draft = ""
-            editing = false
-            focusRequest += 1
-            return
-        }
+        if let active, active.isBlank { active.draft = typed }
         let tab = Tab(shy: true)
         adopt(tab, at: placeForNew())
         leaving()
