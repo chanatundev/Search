@@ -155,7 +155,7 @@ final class Browser: NSObject, ObservableObject {
                let index = splits.firstIndex(where: { $0.contains(id) }), splits[index].focused != id {
                 splits[index].focused = id
             }
-            // The switcher's order and pictures, most recently used first.
+            // Tab previews, kept while the switcher is on.
             // Focus moving within a pair isn't leaving it; a pair left is
             // one entry, under its first page.
             if prefs.splitView, let pair = splits.first(where: { $0.contains(old) }) {
@@ -3309,8 +3309,8 @@ final class Browser: NSObject, ObservableObject {
         select(entry(shown[index]))
     }
 
-    /// ⌃Tab with the switcher on: the space's tabs, the most recently used
-    /// first. Nothing changes until ⌃ is let go of (`commitTabSwitch`).
+    /// ⌃Tab with the switcher on: the space's tabs in tab order.
+    /// Nothing changes until ⌃ is let go of (`commitTabSwitch`).
     func switchTabs(backwards: Bool) {
         guard let activeID else { return }
         // A pair once, under its first page, pictured with its other one.
