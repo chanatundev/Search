@@ -1,9 +1,8 @@
 import SwiftUI
 
 /// ⌃Tab with the switcher on (Settings › Tabs): the tabs of the space on
-/// screen as pictures, the one you are on first and then the ones you last
-/// left, latest first. One gesture's order stays fixed until ⌃ is let go
-/// of, so walking it does not rearrange what is being walked.
+/// screen as pictures, in tab order. One gesture's order stays fixed until
+/// ⌃ is let go of, so walking it does not rearrange what is being walked.
 @MainActor
 final class TabSwitcher: ObservableObject {
     enum Direction { case left, right, up, down }
@@ -63,23 +62,19 @@ final class TabSwitcher: ObservableObject {
         if !tab.isBlank { requestPreview(of: tab, gesture: nil) }
     }
 
-    /// The first ⌃Tab of a gesture takes the space's tabs in that order, the
-    /// ones never left after them in the row's order, and stops on the one
-    /// before this one: a quick press goes back to the last tab, and the
-    /// next comes back again. ⇧ starts from the far end.
+    /// The first ⌃Tab of a gesture walks the space's tabs in their tab bar order,
+    /// advancing from the current tab to the next one (or previous with ⇧).
+    /// Quick presses cycle tabs in order without showing the switcher.
     func step(row: [Tab.ID], current: Tab.ID, backwards: Bool) {
         if candidates.isEmpty {
-            let valid = Set(row)
-            guard valid.contains(current) else { return }
-            var seen: Set<Tab.ID> = []
-            candidates = Array(([current] + recentIDs + row)
-                .filter { valid.contains($0) && seen.insert($0).inserted }
-                .prefix(10))
+            guard let currentIndex = row.firstIndex(of: current) else { return }
+            candidates = row
             guard candidates.count > 1 else {
                 candidates = []
                 return
             }
-            selectedID = backwards ? candidates.last : candidates[1]
+            let nextIndex = (currentIndex + (backwards ? -1 : 1) + candidates.count) % candidates.count
+            selectedID = candidates[nextIndex]
             let work = DispatchWorkItem { [weak self] in self?.show() }
             reveal = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)

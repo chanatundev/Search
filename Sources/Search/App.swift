@@ -1291,7 +1291,7 @@ struct ContentView: View {
         // round to the first again, ⌃⇧Tab the other way — the keys every
         // other browser uses for that.
         //
-        // ⌃Tab brings up the switcher instead, most recently used first —
+        // ⌃Tab brings up the switcher instead, in tab order —
         // whenever there is nothing over the page it would have to cover;
         // otherwise it walks the row as before.
         //
