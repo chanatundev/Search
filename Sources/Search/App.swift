@@ -432,12 +432,6 @@ struct ContentView: View {
                     if browser.prefs.showsLinks { LinkBubble(status: browser.linkStatus) }
                 }
                 .overlay(alignment: .topTrailing) {
-                    if browser.finding {
-                        FindBar(browser: browser)
-                            .transition(.move(edge: .top).combined(with: .opacity))
-                    }
-                }
-                .overlay(alignment: .topTrailing) {
                     if let assistant = browser.assisting, assistant.tab == tab.id {
                         AssistantPanel(browser: browser, assistant: assistant)
                             .padding(.top, browser.finding ? 64 : 14)
@@ -630,6 +624,15 @@ struct ContentView: View {
             .overlay(alignment: .topTrailing) {
                 if let job = browser.fileImport { ImportProgress(browser: browser, job: job) }
             }
+            .overlay(alignment: .topTrailing) {
+                if browser.finding, !browser.prefs.splitView {
+                    FindBar(browser: browser)
+                        .padding(.trailing, sideOnRight ? chrome.width : 0)
+                        .padding(.top, chrome.height)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(Motion.quick, value: browser.finding)
             // The field comes on its spring, and goes quickly: once Return
             // is pressed the page is on its way, and the field is not what
             // there is to watch.
