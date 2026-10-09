@@ -17,39 +17,46 @@ struct SplitStage: View {
         let split = browser.activeSplit
         let shown: [Tab] = split.map { pair in pair.tabs.compactMap { id in browser.tabs.first { $0.id == id } } }
             ?? browser.active.map { [$0] } ?? []
-        ZStack(alignment: .topLeading) {
-            PaneStageView(
-                tabs: shown, split: split, focused: browser.activeID,
-                commit: { id, sizes in browser.setSplitFraction(id, fraction: sizes[0]) },
-                focus: { tab in browser.focusPane(tab) },
-                frames: { frames = $0 },
-                action: { action in
-                    switch action {
-                    case .swap: browser.swapSplit()
-                    case .even: browser.evenSplit()
-                    case .separate: if let tab = browser.active { browser.detachSplit(tab) }
-                    case .closeBoth: browser.closeSplit()
+        PaneStageView(
+            tabs: shown, split: split, focused: browser.activeID,
+            commit: { id, sizes in browser.setSplitFraction(id, fraction: sizes[0]) },
+            focus: { tab in browser.focusPane(tab) },
+            frames: { frames = $0 },
+            action: { action in
+                switch action {
+                case .swap: browser.swapSplit()
+                case .even: browser.evenSplit()
+                case .separate: if let tab = browser.active { browser.detachSplit(tab) }
+                case .closeBoth: browser.closeSplit()
+                }
+            },
+            hover: { hovered = $0 },
+            find: browser.finding ? browser : nil
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Over the stage, never beside it in a stack: the frames are the ones
+        // the stage last said, a step behind a window being made smaller.
+        // Sized with the stage, they held it at its old width, which pushed
+        // the column off the window's left edge and the page off its right,
+        // and the stage, laid out that wide, said the same frames again.
+        .overlay(alignment: .topLeading) {
+            ZStack(alignment: .topLeading) {
+                ForEach(shown) { tab in
+                    if let frame = frames[tab.id] {
+                        PaneLayers(browser: browser, tab: tab, paired: shown.count > 1, width: frame.width,
+                                   hovered: hovered == tab.id)
+                            .frame(width: frame.width, height: frame.height)
+                            .offset(x: frame.minX, y: frame.minY)
                     }
-                },
-                hover: { hovered = $0 },
-                find: browser.finding ? browser : nil
-            )
-            ForEach(shown) { tab in
-                if let frame = frames[tab.id] {
-                    PaneLayers(browser: browser, tab: tab, paired: shown.count > 1, width: frame.width,
-                               hovered: hovered == tab.id)
-                        .frame(width: frame.width, height: frame.height)
-                        .offset(x: frame.minX, y: frame.minY)
+                }
+                if let preview = drag.preview, preview.browserID == ObjectIdentifier(browser) {
+                    SplitDropPreview(preview: preview, tabs: browser.tabs)
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
                 }
             }
-            if let preview = drag.preview, preview.browserID == ObjectIdentifier(browser) {
-                SplitDropPreview(preview: preview, tabs: browser.tabs)
-                    .transition(.opacity)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .animation(Motion.quick, value: drag.preview)
     }
 }
