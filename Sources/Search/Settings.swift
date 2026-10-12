@@ -644,7 +644,7 @@ struct SettingsPanel: View {
                 Rule()
                 Shortcut("⇧⌘C", "Copy address")
                 Rule()
-                Shortcut("⌃⇥  ⌘1–9", "Next tab, a tab by its place")
+                Shortcut("⌃⇥  ⇧⌃Page Up/Down  ⇧⌘↑/↓  ⌘1–9", "Move between tabs, a tab by its place")
                 Rule()
                 Shortcut("⇧⌘S", "Tabs in a sidebar")
                 Rule()

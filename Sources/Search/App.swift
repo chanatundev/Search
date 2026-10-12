@@ -1145,6 +1145,26 @@ struct ContentView: View {
         guard !ShortcutStore.shared.recording else { return false }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+        // The common browser bindings for walking tabs without wrapping to a
+        // distant part of the keyboard: ⇧⌃Page Up/Down and ⇧⌘↑/↓.
+        // Match by key code so layouts and the arrow keys' typed characters
+        // cannot change what they do.
+        if flags.intersection([.command, .shift, .option, .control]) == [.control, .shift], event.keyCode == 116 {
+            browser.step(-1)
+            return true
+        }
+        if flags.intersection([.command, .shift, .option, .control]) == [.control, .shift], event.keyCode == 121 {
+            browser.step(1)
+            return true
+        }
+        if flags.intersection([.command, .shift, .option, .control]) == [.command, .shift], event.keyCode == 126 {
+            browser.step(-1)
+            return true
+        }
+        if flags.intersection([.command, .shift, .option, .control]) == [.command, .shift], event.keyCode == 125 {
+            browser.step(1)
+            return true
+        }
         let controlTab = event.keyCode == 48 && flags.contains(.control)
             && flags.isDisjoint(with: [.command, .option])
 
