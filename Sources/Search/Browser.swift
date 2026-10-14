@@ -1596,6 +1596,8 @@ final class Browser: NSObject, ObservableObject {
     var extensionPopup: String?
     /// Its saved state, for a window other than the oldest (see Windows.swift).
     var record = WindowRecord()
+    /// Present only in windows opened for an installed website.
+    var webApp: WebApp?
     /// Whether its rows are the session files' — the oldest window's — or
     /// its own line in windows.json.
     private(set) var usesFiles = false
@@ -1697,6 +1699,7 @@ final class Browser: NSObject, ObservableObject {
         if let record {
             // Another window: the space it showed, and its own rows.
             self.record = record
+            webApp = record.webApp
             if prefs.usesSpaces, spaces.contains(where: { $0.id == record.space }) { spaceID = record.space }
         } else if prefs.usesSpaces, let last = Store.settings.string(forKey: "space.current").flatMap(UUID.init),
            spaces.contains(where: { $0.id == last }) {

@@ -27,6 +27,8 @@ struct WindowRecord: Codable {
     var space: UUID = Space.firstID
     /// Rows by space, keyed by the space's identifier.
     var rows: [String: Session.Shape] = [:]
+    /// The saved website for a standalone web app window, if this is one.
+    var webApp: WebApp?
 
     init(space: UUID = Space.firstID) { self.space = space }
 
@@ -36,6 +38,7 @@ struct WindowRecord: Codable {
         frame = try? values.decode(String.self, forKey: .frame)
         space = (try? values.decode(UUID.self, forKey: .space)) ?? Space.firstID
         rows = (try? values.decode([String: Session.Shape].self, forKey: .rows)) ?? [:]
+        webApp = try? values.decodeIfPresent(WebApp.self, forKey: .webApp)
     }
 
     var rect: NSRect? { frame.map(NSRectFromString).flatMap { $0.width > 100 && $0.height > 100 ? $0 : nil } }
@@ -180,14 +183,18 @@ enum Browsers {
         let size = popup ? NSSize(width: 480, height: 600)
             : fullScreen ? NSSize(width: 1180, height: 780)
             : front?.window?.frame.size ?? NSSize(width: 1180, height: 780)
+        let style: NSWindow.StyleMask = browser.webApp == nil
+            ? [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            : [.titled, .closable, .miniaturizable, .resizable]
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            styleMask: style,
             backing: .buffered, defer: false
         )
         // A popup has no ContentView.dress() to tie the browser to its window;
         // tied here, before extensions hear of it (#408, lulkebit).
         browser.window = window
+        window.title = browser.webApp?.name ?? ""
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         window.contentView = host
@@ -195,6 +202,10 @@ enum Browsers {
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
             window.minSize = NSSize(width: 200, height: 150)
+        }
+        if browser.webApp != nil {
+            window.titlebarAppearsTransparent = false
+            window.titleVisibility = .visible
         }
         if let frame {
             window.setFrame(frame, display: false)

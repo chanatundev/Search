@@ -1113,6 +1113,13 @@ struct TabMenu: View {
             browser.beginTabEdit(tab)
         }
         .disabled(tab.isBlank || tab.address == nil || tab.pin != nil)
+        Button("Install as Web App") {
+            guard let url = tab.address,
+                  let app = WebApps.install(url: url, title: tab.title.isEmpty ? (url.host() ?? "Web App") : tab.title)
+            else { return }
+            browser.announce("Added \(app.name) to Web Apps")
+        }
+        .disabled(tab.isBlank || tab.address == nil || tab.shy || tab.pin != nil)
         Button(addressTabs.count > 1 ? "Copy \(addressTabs.count) Tab Addresses" : "Copy Address") {
             if addressTabs.count > 1 {
                 browser.copyAddress(for: addressTabs)

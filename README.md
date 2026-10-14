@@ -8,6 +8,7 @@ This project is based on [Search by Office Commun](https://github.com/dricerolan
 - **A visual Space switcher.** Press ``⌃` `` to cycle through previews of open Spaces, then release Control to switch. The palette also offers direct number keys for the first nine Spaces.
 - **More control over tabs.** New tabs open beside the current tab. `⌘`-click tabs to select several, and `⌘⇧`-click to extend the selection across a range. Copy their addresses, close them together, or move them to another Space; `⇧⌘V` opens multiple copied web addresses as tabs.
 - **A configurable new-tab page.** Choose a minimal search view, bookmarks, keyboard shortcuts, or a focus clock and greeting, then switch between them from the page.
+- **Web Apps.** Choose Install as Web App from a tab's menu, then open or remove saved sites from the Web Apps menu. Each opens in its own titled window without the tab bar or address field, using the same sign-ins as its Space.
 - **Tab-order switching.** `⌃Tab` and `⌃⇧Tab` move through tabs in their visible order, rather than most-recently-used order.
 - **Fork artwork.** The app, welcome screen, and About screen use the fork's icon, generated from [Icon/search-favicon-c.png](Icon/search-favicon-c.png).
 

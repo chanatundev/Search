@@ -244,6 +244,30 @@ struct SearchApp: App {
                 // The bookmarks themselves follow, put in by AppKit (see
                 // BookmarkMenu in Bookmarks.swift).
             }
+            CommandMenu("Web Apps") {
+                Button("Install Current Site as Web App") {
+                    guard let url = browser.active?.address,
+                          let app = WebApps.install(url: url, title: browser.active?.title ?? "")
+                    else { return }
+                    browser.announce("Added \(app.name) to Web Apps")
+                }
+                .disabled(browser.active?.address == nil || browser.active?.shy == true)
+                Divider()
+                if WebApps.installed.isEmpty {
+                    Button("No Web Apps Installed") {}
+                        .disabled(true)
+                } else {
+                    ForEach(WebApps.installed) { app in
+                        Menu(app.name) {
+                            Button("Open") { WebApps.open(app) }
+                            Button("Remove from Web Apps") {
+                                WebApps.remove(app)
+                                browser.announce("Removed \(app.name) from Web Apps")
+                            }
+                        }
+                    }
+                }
+            }
             CommandMenu("History") {
                 Section("Recently Visited") {
                     ForEach(browser.recentlyVisited) { trace in
@@ -397,7 +421,7 @@ struct ContentView: View {
                     .transition(.move(edge: sideOnRight ? .trailing : .leading))
             }
 
-            if !browser.prefs.sidebar, !browser.folded, fullscreenTab == nil {
+            if ((!browser.prefs.sidebar && !browser.folded) || (browser.webApp != nil && browser.tabs.count > 1)), fullscreenTab == nil {
                 TabBar(browser: browser)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
@@ -424,7 +448,7 @@ struct ContentView: View {
     // Page that is never rebuilt from one tab to the next (see Stage.swift).
     @ViewBuilder
     private var stage: some View {
-        if browser.prefs.splitView {
+        if browser.prefs.splitView, browser.webApp == nil {
             SplitStage(browser: browser)
         } else if let tab = browser.active {
             Page(tab: tab)
@@ -461,7 +485,7 @@ struct ContentView: View {
     /// The bookmarks bar is up: asked for, there are bookmarks, and the tabs
     /// aren't folded away or under a video filling the screen.
     private var barShown: Bool {
-        browser.prefs.bookmarksBar && !browser.bookmarks.isEmpty && !browser.folded
+        browser.webApp == nil && browser.prefs.bookmarksBar && !browser.bookmarks.isEmpty && !browser.folded
             && fullscreenTab == nil
     }
 
@@ -527,7 +551,9 @@ struct ContentView: View {
         // SplitStage owns the field whenever Split View is enabled, including
         // an ordinary tab that is not currently paired. Drawing it here too
         // leaves two offset address fields on a blank tab.
-        if browser.fieldShowing, !browser.prefs.splitView {
+        if browser.webApp == nil
+            ? (browser.fieldShowing && !browser.prefs.splitView)
+            : browser.editing {
             Omnibox(browser: browser, over: !(browser.active?.isBlank ?? true))
                 // Centred on the page, not on the window. The column of tabs
                 // is not what the field is standing over, and dimming it along
@@ -603,7 +629,7 @@ struct ContentView: View {
         window_
             // The column folded away, and out again at the edge (see Fold.swift).
             .overlay(alignment: sideOnRight ? .trailing : .leading) {
-                if fullscreenTab == nil { Fold(browser: browser, prefs: browser.prefs) }
+                if fullscreenTab == nil, browser.webApp == nil { Fold(browser: browser, prefs: browser.prefs) }
             }
             .overlay(alignment: .bottom) { bars }
             .overlay {
@@ -893,13 +919,13 @@ struct ContentView: View {
 
     /// True while the tabs are down the left, and not folded away (see Fold.swift).
     private var sidebar: Bool {
-        browser.prefs.sidebar && !browser.folded && fullscreenTab == nil
+        browser.webApp == nil && browser.prefs.sidebar && !browser.folded && fullscreenTab == nil
     }
 
     /// The column has its own corner for the lights, so the page beside it
     /// starts at the very top; the strip needs a band.
     private var band: CGFloat {
-        guard fullscreenTab == nil else { return 0 }
+        guard fullscreenTab == nil, browser.webApp == nil else { return 0 }
         // Folded, the strip is out of the window and the page has its height.
         return browser.prefs.sidebar || browser.folded ? 0 : Metrics.strip
     }
@@ -962,7 +988,8 @@ struct ContentView: View {
         // Light or dark is the app's to say (Settings › Appearance); the
         // window only has to be the ground colour that goes with it.
         window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
+        window.titleVisibility = browser.webApp == nil ? .hidden : .visible
+        window.title = browser.webApp?.name ?? ""
         window.backgroundColor = Palette.NS.ground
         // The strip does the dragging, so the page underneath can't be grabbed
         // by accident while selecting text.

@@ -165,6 +165,36 @@ struct CommandPalette: View {
             action: { browser.sleepBackgroundSpaces() }
         ))
 
+        if let active, let url = active.address {
+            extras.append(.init(
+                "Install Current Site as Web App",
+                section: "Web Apps",
+                keywords: "pwa install standalone application website",
+                enabled: !active.shy,
+                action: {
+                    guard let app = WebApps.install(url: url, title: active.title) else { return }
+                    browser.announce("Added \(app.name) to Web Apps")
+                }
+            ))
+        }
+        for app in WebApps.installed {
+            extras.append(.init(
+                "Open \(app.name)",
+                section: "Web Apps",
+                keywords: "pwa launch website installed",
+                action: { WebApps.open(app) }
+            ))
+            extras.append(.init(
+                "Remove \(app.name) from Web Apps",
+                section: "Web Apps",
+                keywords: "pwa uninstall delete",
+                action: {
+                    WebApps.remove(app)
+                    browser.announce("Removed \(app.name) from Web Apps")
+                }
+            ))
+        }
+
         extras.append(.init(
             isFullscreen ? "Exit Full Screen" : "Enter Full Screen",
             section: "Window",
