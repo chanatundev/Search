@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Looking for a word on the page. A pill in the top corner, the same white and
@@ -25,9 +26,12 @@ struct FindBar: View {
                     .textFieldStyle(.plain)
                     .foregroundStyle(Palette.ink)
                     .accessibilityLabel("Find on page")
-                    .accessibilityHint("Type text to search this page. Press Return to find the next match.")
+                    .accessibilityHint("Type text to search this page. Press Return to find the next match, or Shift-Return to find the previous match.")
                     .focused($focused)
-                    .onSubmit { browser.look(forward: true) }
+                    .onSubmit {
+                        let shifted = (NSApp.currentEvent?.modifierFlags ?? NSEvent.modifierFlags).contains(.shift)
+                        browser.look(forward: !shifted)
+                    }
             }
             .font(.system(size: 12.5))
             .frame(width: fieldWidth)
