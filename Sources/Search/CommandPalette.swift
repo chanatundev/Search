@@ -17,6 +17,7 @@ struct CommandPalette: View {
         "file.reopen": "undo restore closed tab",
         "file.openAddress": "url location bar omnibox go",
         "file.closeTab": "close w",
+        "file.closeWindow": "quit window",
         "file.import": "bookmarks passwords history chrome arc brave safari",
         "file.print": "pdf hardcopy",
         "edit.find": "search page text in document",

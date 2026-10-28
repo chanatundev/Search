@@ -224,9 +224,7 @@ struct TabBar: View {
                 .allowsHitTesting(false)
         } else {
             let space = browser.spaces[index]
-            let row = space.id == browser.spaceID
-                ? Parked(tabs: browser.tabs, active: browser.activeID, splits: browser.splits)
-                : browser.parked[space.id] ?? Parked(tabs: [], active: nil)
+            let row = browser.row(for: space.id)
             let shown = rowTabs(row.tabs, splits: row.splits)
             let each = width(in: strip, tabs: shown, splits: row.splits)
             HStack(spacing: Metrics.tabGap) {

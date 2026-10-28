@@ -9,6 +9,8 @@ import SwiftUI
 // field and panels. What every window shares lives in `Shared` — settings,
 // History, bookmarks, downloads — and the spaces and pins are the same
 // everywhere: each window shows one space at a time, of its own choosing.
+// A space's tabs live in one window. Another window showing that space
+// takes the row; it does not keep an empty copy of it.
 //
 // The first window is SwiftUI's scene, as it always was; any other is an
 // AppKit window around the same ContentView. With one window, and nobody
@@ -275,6 +277,8 @@ enum Browsers {
             closed.append((record(of: browser, rows: true), Date()))
             if closed.count > 10 { closed.removeFirst(closed.count - 10) }
         }
+        let heir = all.first { $0 !== browser && $0.extensionPopup == nil }
+        browser.handOffRows(to: heir)
         all.removeAll { $0 === browser }
         if #available(macOS 15.4, *) { Extensions.shared.detach(browser) }
         browser.closeAll()

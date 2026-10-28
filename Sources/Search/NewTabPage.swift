@@ -194,6 +194,7 @@ struct NewTabShortcutsView: View {
     private let leftColumn: [Item] = [
         Item(key: "⌘T", desc: "New tab"),
         Item(key: "⌘W", desc: "Close tab"),
+        Item(key: "⇧⌘W", desc: "Close window"),
         Item(key: "⌃Tab", desc: "Switch tabs"),
         Item(key: "⌃`", desc: "Switch spaces"),
     ]
