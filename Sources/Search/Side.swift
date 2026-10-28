@@ -232,7 +232,7 @@ struct SideBar: View {
                     }
                 }
             } else {
-                preview(browser.parked[browser.spaces[index].id] ?? Parked(tabs: [], active: nil), pill: pill)
+                preview(browser.row(for: browser.spaces[index].id), pill: pill)
             }
         }
         .padding(.horizontal, 10)

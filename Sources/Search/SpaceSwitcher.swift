@@ -81,13 +81,8 @@ final class SpaceSwitcher: ObservableObject {
         guard visible else { return }
         let token = generation
         for space in browser.spaces {
-            let activeTab: Tab? = if space.id == browser.spaceID {
-                browser.active
-            } else if let row = browser.parked[space.id] {
-                row.tabs.first { $0.id == row.active } ?? row.tabs.first
-            } else {
-                nil
-            }
+            let row = browser.row(for: space.id)
+            let activeTab = row.tabs.first { $0.id == row.active } ?? row.tabs.first
             guard let activeTab else { continue }
             if let cached = browser.tabSwitcher.preview(for: activeTab.id, address: activeTab.address) {
                 cachePreview(cached, for: space.id)
@@ -188,11 +183,9 @@ struct SpaceSwitcherOverlay: View {
     }
 
     private func previewContent(for space: Space, width: CGFloat, height: CGFloat) -> some View {
-        let isCurrent = space.id == browser.spaceID
-        let tabs = isCurrent ? browser.tabs : (browser.parked[space.id]?.tabs ?? [])
-        let activeTab: Tab? = isCurrent ? browser.active : (browser.parked[space.id].flatMap { row in
-            row.tabs.first { $0.id == row.active } ?? row.tabs.first
-        })
+        let row = browser.row(for: space.id)
+        let tabs = row.tabs
+        let activeTab = row.tabs.first { $0.id == row.active } ?? row.tabs.first
         let color = Spaces.colours[space.colour % Spaces.colours.count]
 
         return ZStack {
@@ -235,7 +228,7 @@ struct SpaceSwitcherOverlay: View {
 
     private func card(_ space: Space, width: CGFloat, previewHeight: CGFloat, height: CGFloat) -> some View {
         let isCurrent = space.id == browser.spaceID
-        let count = isCurrent ? browser.tabs.count : (browser.parked[space.id]?.tabs.count ?? 0)
+        let count = browser.row(for: space.id).tabs.count
         let color = Spaces.colours[space.colour % Spaces.colours.count]
         let isSelected = space.id == switcher.selectedID
 

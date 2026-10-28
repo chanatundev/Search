@@ -1563,6 +1563,9 @@ final class Browser: NSObject, ObservableObject {
     }
     @Published var spaceID = Space.firstID
     var parked: [UUID: Parked] = [:]
+    /// The page on screen is a blank so this window can be open. The space's
+    /// tabs are in another window, and this blank is never saved as that row.
+    var standIn = false
     /// How far the column's rows have followed two fingers sideways, and
     /// whether the card for a new space stands in for them (see SpaceSwipe).
     @Published var spaceSwipe: CGFloat = 0
@@ -1764,6 +1767,20 @@ final class Browser: NSObject, ObservableObject {
     /// The pins are every window's (see Pins.swift): a window new to this
     /// space has them too, before an empty tab.
     func restoreSession() {
+        if let taken = takeParked(spaceID), !taken.tabs.isEmpty {
+            standIn = false
+            tabGroups = taken.groups ?? []
+            splits = taken.splits
+            tabs += taken.tabs
+            activeID = taken.active.flatMap { id in tabs.first { $0.id == id }?.id } ?? tabs.first?.id
+            for tab in tabs where visibleTabIDs.contains(tab.id) { _ = tab.wake() }
+            writeSession(now: true)
+            return
+        }
+        // No row of this window's own, and another window already has the
+        // space on screen: a blank here, not a second copy of its tabs.
+        let own = usesFiles ? nil : record.rows[spaceID.uuidString]
+        standIn = Browser.holder(of: spaceID, except: self) != nil && (own?.tabs.isEmpty != false)
         let saved = readRow(spaceID)
         tabGroups = (saved.groups ?? []).filter { group in
             saved.tabs.contains { $0.groupID == group.id }
@@ -1970,6 +1987,8 @@ final class Browser: NSObject, ObservableObject {
     }
 
     func writeSession(now: Bool = false) {
+        // A new window's blank is not the space's row (see standIn).
+        guard !standIn else { return }
         // The pins as they are here, for the other windows (see Pins.swift).
         Pins.set(spaceID, pinDefs(tabs), from: self)
         writeRow(spaceID, session(tabs, active: activeID, groups: tabGroups, splits: splits), now: now)
@@ -2026,7 +2045,7 @@ final class Browser: NSObject, ObservableObject {
 
     /// Another window changed a space's pins: this window's row there follows.
     func pinsChanged(in space: UUID) {
-        if space == spaceID {
+        if space == spaceID, !standIn {
             // Drawn again even when only a pin's letter or name changed.
             objectWillChange.send()
             let row = reconcilePins(tabs, space: space)
@@ -2251,46 +2270,136 @@ final class Browser: NSObject, ObservableObject {
     /// A space's row as saved: the session files' for the oldest window,
     /// this window's own record for any other.
     func readRow(_ space: UUID) -> Session.Shape {
-        usesFiles ? Session.read(space: space) : (record.rows[space.uuidString] ?? Session.Shape(tabs: [], active: 0))
+        // This window's own saved row, when it has one (a tab dragged out
+        // into it, a window brought back). Otherwise the session — unless
+        // another window is already holding the tabs, which an empty read
+        // would copy.
+        if !usesFiles, let own = record.rows[space.uuidString], !own.tabs.isEmpty { return own }
+        if Browser.holder(of: space, except: self) != nil { return Session.Shape(tabs: [], active: 0) }
+        if usesFiles { return Session.read(space: space) }
+        let saved = Session.read(space: space)
+        return saved.tabs.isEmpty ? (record.rows[space.uuidString] ?? saved) : saved
     }
 
     func writeRow(_ space: UUID, _ shape: Session.Shape, now: Bool) {
-        if usesFiles {
+        if standIn, space == spaceID { return }
+        // The window holding the tabs is the one that writes them. An empty
+        // row from a window that doesn't is how a new window used to clear
+        // every space.
+        if shape.tabs.isEmpty, Browser.holder(of: space, except: self) != nil { return }
+        if Browser.holder(of: space, except: self) == nil {
             Session.write(now: now, space: space, shape)
-        } else {
+        }
+        if !usesFiles {
             record.rows[space.uuidString] = shape
             if now { Browsers.save(now: true) } else { Browsers.saveSoon() }
         }
     }
 
-    /// Every row this window has, by space: the one on screen, the parked
-    /// ones, and those saved but not brought up this time.
+    /// Every row this window is holding: the one on screen, and the ones parked.
     func allRows() -> [String: Session.Shape] {
         var rows: [String: Session.Shape] = [:]
-        for space in spaces {
-            let saved = readRow(space.id)
-            if !saved.tabs.isEmpty { rows[space.id.uuidString] = saved }
+        if !standIn {
+            rows[spaceID.uuidString] = session(tabs, active: activeID, groups: tabGroups, splits: splits)
         }
-        rows[spaceID.uuidString] = session(tabs, active: activeID, groups: tabGroups, splits: splits)
-        for (space, row) in parked {
+        for (space, row) in parked where !row.tabs.isEmpty {
             rows[space.uuidString] = session(row.tabs, active: row.active, groups: row.groups ?? readRow(space).groups, splits: row.splits)
         }
         return rows
     }
 
-    /// The oldest window closed: this one is the oldest now, and its rows go
-    /// into the session files, every space's — an empty row where it has
-    /// none, or the closed window's would come back there.
+    /// The oldest window closed: this one is the oldest now, and the rows it
+    /// is holding go into the session files. A space it isn't holding stays
+    /// as it was — writing an empty row there is how its tabs used to vanish.
     func becomePrimary() {
         let rows = allRows()
         usesFiles = true
-        for space in spaces {
-            Session.write(now: true, space: space.id, rows[space.id.uuidString] ?? Session.Shape(tabs: [], active: 0))
+        for (key, shape) in rows {
+            guard let id = UUID(uuidString: key) else { continue }
+            Session.write(now: true, space: id, shape)
         }
         record.rows = [:]
         Store.settings.set(spaceID.uuidString, forKey: "space.current")
         // SwiftUI's window, opened next launch, comes back where this one is.
         window?.saveFrame(usingName: Browsers.sceneID)
+    }
+
+    /// The window that has a space's tabs: on screen, or parked. A stand-in
+    /// blank doesn't count.
+    static func holder(of space: UUID, except browser: Browser?) -> Browser? {
+        let others = Browsers.all.filter { $0 !== browser && $0.extensionPopup == nil }
+        if let showing = others.first(where: { $0.spaceID == space && !$0.standIn }) { return showing }
+        return others.first { $0.parked[space]?.tabs.isEmpty == false }
+    }
+
+    /// This window is showing the space, so the parked copy comes here.
+    /// One row of tabs, not a second empty one.
+    private func takeParked(_ id: UUID) -> Parked? {
+        for other in Browsers.all where other !== self && other.extensionPopup == nil {
+            guard let row = other.parked[id], !row.tabs.isEmpty else { continue }
+            other.parked[id] = nil
+            other.record.rows[id.uuidString] = nil
+            other.objectWillChange.send()
+            return row
+        }
+        return nil
+    }
+
+    /// The tabs a space shows in this window: its own, or the window that
+    /// is holding them. A space another window has open is not an empty row.
+    func row(for space: UUID) -> Parked {
+        if space == spaceID, !standIn {
+            return Parked(tabs: tabs, active: activeID, splits: splits, groups: tabGroups)
+        }
+        if let own = parked[space], !own.tabs.isEmpty { return own }
+        if let holder = Browser.holder(of: space, except: self) {
+            if holder.spaceID == space, !holder.standIn {
+                return Parked(tabs: holder.tabs, active: holder.activeID, splits: holder.splits, groups: holder.tabGroups)
+            }
+            if let row = holder.parked[space], !row.tabs.isEmpty { return row }
+        }
+        if space == spaceID {
+            return Parked(tabs: tabs, active: activeID, splits: splits, groups: tabGroups)
+        }
+        return Parked(tabs: [], active: nil)
+    }
+
+    /// This window is going away. The spaces it was holding go to the one
+    /// still open, tabs and all, instead of closing with it.
+    func handOffRows(to heir: Browser?) {
+        guard let heir else { return }
+        func give(_ space: UUID, _ row: Parked) {
+            guard !row.tabs.isEmpty else { return }
+            if heir.spaceID == space, heir.standIn {
+                for tab in heir.tabs { tab.close() }
+                heir.standIn = false
+                heir.tabGroups = row.groups ?? []
+                heir.showRow(row.tabs, active: row.active, splits: row.splits)
+                return
+            }
+            if heir.spaceID == space {
+                let have = Set(heir.tabs.map(\.id))
+                for tab in row.tabs where !have.contains(tab.id) { heir.tabs.append(tab) }
+                return
+            }
+            if heir.parked[space]?.tabs.isEmpty == false {
+                for tab in row.tabs { tab.close() }
+                return
+            }
+            heir.parked[space] = row
+        }
+        if standIn {
+            for tab in tabs { tab.close() }
+        } else {
+            give(spaceID, Parked(tabs: tabs, active: activeID, splits: splits, groups: tabGroups))
+        }
+        tabs = []
+        activeID = nil
+        splits = []
+        let leaving = parked
+        parked = [:]
+        for (space, row) in leaving { give(space, row) }
+        heir.objectWillChange.send()
     }
 
     /// Its window closed for good, with others open: every page let go.
@@ -2715,6 +2824,12 @@ final class Browser: NSObject, ObservableObject {
         else if let tab = active { close(tab) }
     }
 
+    /// ⌘⇧W. The window closes the way its button does, so a space's tabs
+    /// stay with a window that is still open.
+    func closeWindow() {
+        window?.performClose(nil)
+    }
+
     /// The panel over the page put away, if one is up — for ⌘W and Escape
     /// both. Whether there was one.
     func closePanel() -> Bool {
@@ -3096,6 +3211,22 @@ final class Browser: NSObject, ObservableObject {
         tab.rehome(in: id)
         // Its group stays behind: the space it goes to has groups of its own.
         tab.groupID = nil
+        if let holder = Browser.holder(of: id, except: self) {
+            if holder.spaceID == id, !holder.standIn {
+                holder.receive(tab)
+            } else {
+                var row = holder.parked[id] ?? Parked(tabs: [], active: nil)
+                let place = tab.pin == nil ? row.tabs.count : (row.tabs.firstIndex { $0.pin == nil } ?? row.tabs.count)
+                row.tabs.insert(tab, at: place)
+                if row.active == nil { row.active = tab.id }
+                holder.parked[id] = row
+                holder.writeRow(id, holder.session(row.tabs, active: row.active, groups: row.groups, splits: row.splits), now: true)
+                holder.objectWillChange.send()
+            }
+            writeSession(now: true)
+            announce("Moved to \(destination.name)")
+            return true
+        }
         var row = parked[id] ?? loadRow(id)
         let place = tab.pin == nil ? row.tabs.count : (row.tabs.firstIndex { $0.pin == nil } ?? row.tabs.count)
         row.tabs.insert(tab, at: place)
@@ -3201,6 +3332,9 @@ final class Browser: NSObject, ObservableObject {
     /// A tab from another window, in front here. The empty tab a new window
     /// starts with makes way for it.
     func receive(_ tab: Tab) {
+        // A tab put here is this window's row, not the blank standing in
+        // for a space another window has open.
+        standIn = false
         prepare(tab)
         if !tab.shy { tab.rehome(in: spaceID) }
         let blanks = tabs.filter { $0.isBlank && !$0.bench && split(for: $0) == nil }

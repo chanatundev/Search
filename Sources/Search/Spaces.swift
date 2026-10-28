@@ -190,17 +190,30 @@ extension Browser {
     private func enter(_ id: UUID) {
         spaceSwitcher.cancel()
         guard id != spaceID, let to = spaces.firstIndex(where: { $0.id == id }) else { return }
+        // Already on screen in another window: that window keeps the tabs.
+        // Switching here used to open an empty row and, once saved, replace them.
+        if let holder = Browser.holder(of: id, except: self), holder.spaceID == id, !holder.standIn {
+            holder.window?.makeKeyAndOrderFront(nil)
+            announce("\(spaces[to].name) is open in another window")
+            return
+        }
         // Which way the icon at the foot turns over: the way the spaces lie.
         if !makingSpace { spaceStep = to > (spaces.firstIndex { $0.id == spaceID } ?? 0) ? 1 : -1 }
         cancelTabEdit()
         if floater.showing { land() }
-        writeSession(now: true)
-        for tab in tabs where visibleTabIDs.contains(tab.id) { tab.touch() }
-
-        // The row on screen is parked as it is, sound and all: music or a
-        // stream keeps playing in the space you left, as it does in a tab
-        // you left. ⌘⇧M, or its speaker, stops it.
-        parked[spaceID] = Parked(tabs: tabs, active: activeID, splits: splits, groups: tabGroups)
+        if standIn {
+            // The blank a new window opened with is not this space's row.
+            for tab in tabs { tab.close() }
+            showRow([], active: nil)
+            standIn = false
+        } else {
+            writeSession(now: true)
+            for tab in tabs where visibleTabIDs.contains(tab.id) { tab.touch() }
+            // The row on screen is parked as it is, sound and all: music or a
+            // stream keeps playing in the space you left, as it does in a tab
+            // you left. ⌘⇧M, or its speaker, stops it.
+            parked[spaceID] = Parked(tabs: tabs, active: activeID, splits: splits, groups: tabGroups)
+        }
 
         spaceID = id
         // A space kept in memory has its groups with it; one that isn't is
@@ -231,7 +244,12 @@ extension Browser {
     /// the next space beside this one while two fingers bring it in.
     func preloadSpaces() {
         for space in spaces where space.id != spaceID && parked[space.id] == nil {
-            parked[space.id] = loadRow(space.id)
+            // Another window already has this space's tabs. Parking an empty
+            // row here is what made a new window show every space as empty.
+            guard Browser.holder(of: space.id, except: self) == nil else { continue }
+            let row = loadRow(space.id)
+            guard !row.tabs.isEmpty else { continue }
+            parked[space.id] = row
         }
     }
 

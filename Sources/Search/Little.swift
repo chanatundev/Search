@@ -71,7 +71,7 @@ final class LittleWindow: NSObject, NSWindowDelegate {
     func take(_ event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
-        if event.keyCode == 53 && flags.isEmpty || key == "w" && flags == .command {
+        if event.keyCode == 53 && flags.isEmpty || key == "w" && (flags == .command || flags == [.command, .shift]) {
             window.performClose(nil)
             return true
         }
