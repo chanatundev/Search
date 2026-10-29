@@ -3114,9 +3114,7 @@ final class Browser: NSObject, ObservableObject {
     /// blank doesn't count.
     static func holder(of space: UUID, except browser: Browser?) -> Browser? {
         let others = Browsers.all.filter { $0 !== browser && $0.extensionPopup == nil }
-        // Only a window on screen shows a space; a browser with no window is
-        // one nobody can see (a test's, or one closed but not yet let go).
-        if let showing = others.first(where: { $0.spaceID == space && !$0.standIn && $0.window != nil }) { return showing }
+        if let showing = others.first(where: { $0.spaceID == space && !$0.standIn }) { return showing }
         return others.first { $0.parked[space]?.tabs.isEmpty == false }
     }
 
