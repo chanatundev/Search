@@ -1404,25 +1404,37 @@ struct ContentView: View {
         // ⌃Tab, or the key Settings › Shortcuts gave the switcher instead,
         // and whether ⇧ sends it back.
         let recent = ShortcutStore.shared.recentSwitch(event)
-        // The common browser bindings for walking tabs without wrapping to a
-        // distant part of the keyboard: ⇧⌃Page Up/Down and ⇧⌘↑/↓.
-        // Match by key code so layouts and the arrow keys' typed characters
-        // cannot change what they do.
-        if flags.intersection([.command, .shift, .option, .control]) == [.control, .shift], event.keyCode == 116 {
+        // Walking and moving tabs by the keys: ⌘Page Up/Down and ⇧⌘←/→ go to
+        // the previous and next tab; ⇧⌘↑/↓ and ⇧⌘Page Up/Down move the tab
+        // you are on one place back or on in the row. ⇧⌃Page Up/Down still
+        // walks. Match by key code so layouts and the arrow keys' typed
+        // characters cannot change what they do.
+        let chord = flags.intersection([.command, .shift, .option, .control])
+        if chord == [.control, .shift], event.keyCode == 116 {
             browser.step(-1)
             return true
         }
-        if flags.intersection([.command, .shift, .option, .control]) == [.control, .shift], event.keyCode == 121 {
+        if chord == [.control, .shift], event.keyCode == 121 {
             browser.step(1)
             return true
         }
-        if flags.intersection([.command, .shift, .option, .control]) == [.command, .shift], event.keyCode == 126 {
-            browser.step(-1)
-            return true
+        if chord == [.command, .shift] {
+            switch event.keyCode {
+            case 126, 116: browser.moveActiveTab(-1); return true
+            case 125, 121: browser.moveActiveTab(1); return true
+            // ⇧⌘← and ⇧⌘→ select text in an editor, as ⌘← does, so they
+            // are the tabs' only while nothing is being typed.
+            case 123 where !caretIn(event): browser.step(-1); return true
+            case 124 where !caretIn(event): browser.step(1); return true
+            default: break
+            }
         }
-        if flags.intersection([.command, .shift, .option, .control]) == [.command, .shift], event.keyCode == 125 {
-            browser.step(1)
-            return true
+        if chord == [.command] {
+            switch event.keyCode {
+            case 116: browser.step(-1); return true
+            case 121: browser.step(1); return true
+            default: break
+            }
         }
 
         // While the tab switcher is up, ⌃ and the arrows move through it and
