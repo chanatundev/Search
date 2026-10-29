@@ -22,80 +22,93 @@ struct Omnibox: View {
     var fitted = false
 
     var body: some View {
-        if fitted {
-            GeometryReader { geometry in
-                content(width: min(Metrics.fieldWidth, max(0, geometry.size.width - 28)))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Group {
+            if fitted {
+                GeometryReader { geometry in
+                    content(width: min(Metrics.fieldWidth, max(0, geometry.size.width - 28)))
+                }
+            } else {
+                content(width: Metrics.fieldWidth)
             }
-        } else {
-            content(width: Metrics.fieldWidth)
         }
+        .allowsHitTesting(browser.fieldShowing)
     }
 
     private func content(width: CGFloat) -> some View {
         ZStack {
-            if over {
-                // The page is still there, just out of the way.
-                Rectangle()
-                    .fill(Palette.ground.opacity(0.74))
-                    .ignoresSafeArea(.all, edges: fitted ? [] : .all)
-                    .onTapGesture { browser.dismiss() }
-                    .transition(.opacity)
-            }
-
-            VStack(spacing: 18) {
-                if !over, !fitted, browser.prefs.newTabScreen == .focus, browser.typed.isEmpty {
-                    FocusHeader()
-                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            // Keep the container mounted: only the field scales, while the
+            // page's cover fades without pulling its edges into view.
+            if browser.fieldShowing {
+                if over {
+                    // The page is still there, just out of the way.
+                    Rectangle()
+                        .fill(Palette.ground.opacity(0.74))
+                        .ignoresSafeArea(.all, edges: fitted ? [] : .all)
+                        .onTapGesture { browser.dismiss() }
+                        .transition(.opacity)
                 }
 
-                field
-                    .frame(width: width)
-                // The list hangs below the field rather than stacking with it,
-                // so a list that grows never lifts the field out from under
-                // what is being typed.
-                .overlay(alignment: .top) {
-                    // Present or gone, not always-on-and-hidden: the list keeps
-                    // the appear and disappear it had, and the overlay is what
-                    // keeps that from moving the field.
-                    if !browser.offers.isEmpty || browser.siteOffer != nil {
-                        list
-                            .frame(width: width)
-                            .offset(y: Self.fieldHeight + 8)
+                VStack(spacing: 18) {
+                    if !over, !fitted, browser.prefs.newTabScreen == .focus, browser.typed.isEmpty {
+                        FocusHeader()
+                            .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                    }
+
+                    field
+                        .frame(width: width)
+                    // The list hangs below the field rather than stacking with it,
+                    // so a list that grows never lifts the field out from under
+                    // what is being typed.
+                    .overlay(alignment: .top) {
+                        // Present or gone, not always-on-and-hidden: the list keeps
+                        // the appear and disappear it had, and the overlay is what
+                        // keeps that from moving the field.
+                        if !browser.offers.isEmpty || browser.siteOffer != nil {
+                            list
+                                .frame(width: width)
+                                .offset(y: Self.fieldHeight + 8)
+                        }
+                    }
+
+                    if !over, !fitted, browser.typed.isEmpty, browser.offers.isEmpty {
+                        switch browser.prefs.newTabScreen {
+                        case .bookmarks:
+                            NewTabBookmarksView(browser: browser)
+                                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                        case .shortcuts:
+                            NewTabShortcutsView(browser: browser)
+                                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                        case .minimal, .focus:
+                            EmptyView()
+                        }
                     }
                 }
+                // Lifted a little above centre: dead centre reads as low,
+                // because the strip at the top isn't part of what the eye is
+                // measuring.
+                .padding(.bottom, over ? 60 : (browser.prefs.newTabScreen == .focus ? 20 : 60))
+                .transition(.scale(scale: 0.97).combined(with: .opacity))
+                // The list's arrival and its leaving are animated from here,
+                // briefly: nothing that changes the suggestions does it inside
+                // an animation of its own. Its rows follow what was typed or
+                // pasted at once — sliding into place on a spring between
+                // keystrokes, they trailed behind the field.
+                .animation(Motion.quick, value: browser.offers.isEmpty && browser.siteOffer == nil)
+                .animation(Motion.settle, value: refused)
+                .animation(Motion.quick, value: browser.prefs.newTabScreen)
+                .animation(Motion.quick, value: browser.typed.isEmpty)
 
                 if !over, !fitted, browser.typed.isEmpty, browser.offers.isEmpty {
-                    switch browser.prefs.newTabScreen {
-                    case .bookmarks:
-                        NewTabBookmarksView(browser: browser)
-                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                    case .shortcuts:
-                        NewTabShortcutsView(browser: browser)
-                            .transition(.opacity.combined(with: .scale(scale: 0.98)))
-                    case .minimal, .focus:
-                        EmptyView()
+                    VStack {
+                        Spacer()
+                        NewTabSwitcher(prefs: browser.prefs)
+                            .padding(.bottom, 24)
                     }
+                    .transition(.opacity)
                 }
-            }
-            // Lifted a little above centre: dead centre reads as low,
-            // because the strip at the top isn't part of what the eye is
-            // measuring.
-            .padding(.bottom, over ? 60 : (browser.prefs.newTabScreen == .focus ? 20 : 60))
-            .animation(Motion.quick, value: browser.prefs.newTabScreen)
-            .animation(Motion.quick, value: browser.typed.isEmpty)
-
-            if !over, !fitted, browser.typed.isEmpty, browser.offers.isEmpty {
-                VStack {
-                    Spacer()
-                    NewTabSwitcher(prefs: browser.prefs)
-                        .padding(.bottom, 24)
-                }
-                .transition(.opacity)
             }
         }
-        .animation(Motion.quick, value: browser.offers.isEmpty && browser.siteOffer == nil)
-        .animation(Motion.settle, value: refused)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var field: some View {
@@ -132,6 +145,10 @@ struct Omnibox: View {
             )
             .shadow(color: .black.opacity(0.06), radius: 24, y: 8)
             .modifier(Shake(travel: shake))
+            .onAppear {
+                shake = 0
+                refused = false
+            }
             .onChange(of: browser.refusals) { _, _ in
                 shake = 0
                 refused = true
@@ -172,7 +189,8 @@ struct Omnibox: View {
         .transition(.scale(scale: 0.98, anchor: .top).combined(with: .opacity))
     }
 
-    private struct Row: View {
+    /// One row of a list of places, here and under the field in the tab.
+    struct Row: View {
         let offer: Suggestion
         /// Where the arrow keys have walked to. The pointer gets its own,
         /// quieter mark, and changes nothing but the look of the row.
@@ -189,7 +207,7 @@ struct Omnibox: View {
                     // site rather than a magnifying glass. Nothing is fetched
                     // for one that isn't known; the glass is what the row
                     // wears until then.
-                    if let site = Favicons.site(offer.url), let icon = Favicons.shared.cached(site) {
+                    if let icon = Favicons.shared.cached(for: offer.url) {
                         Image(nsImage: icon)
                             .resizable()
                             .interpolation(.high)
@@ -200,6 +218,12 @@ struct Omnibox: View {
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(Palette.muted)
                     }
+                case .suggested:
+                    // The engine's own words: always the glass, so they read
+                    // as searches rather than places.
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Palette.muted)
                 case .open:
                     // Already open: naming it takes you back to it rather than
                     // opening a second copy.
@@ -207,6 +231,12 @@ struct Omnibox: View {
                         .fill(Palette.ink.opacity(0.55))
                         .frame(width: 5, height: 5)
                         .padding(.horizontal, 2)
+                case .bookmark:
+                    // Kept by you, not only visited: the bookmark's mark,
+                    // as quiet as the command's.
+                    Image(systemName: "bookmark")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Palette.muted)
                 case .command:
                     Image(systemName: "command")
                         .font(.system(size: 10, weight: .medium))
@@ -216,7 +246,7 @@ struct Omnibox: View {
                 }
                 // The row reads as 1.0.4's did, without the www; the key
                 // itself keeps it, for completing and going there.
-                Text(Address.withoutWWW(offer.key))
+                Text(offer.kind == .suggested ? offer.key : Address.withoutWWW(offer.key))
                     .font(.system(size: 13))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
@@ -399,8 +429,8 @@ struct AddressField: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(browser: browser) }
 
-    func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField()
+    func makeNSView(context: Context) -> Field {
+        let field = Field()
         field.delegate = context.coordinator
         field.isBordered = false
         field.drawsBackground = false
@@ -425,7 +455,7 @@ struct AddressField: NSViewRepresentable {
         return field
     }
 
-    func updateNSView(_ field: NSTextField, context: Context) {
+    func updateNSView(_ field: Field, context: Context) {
         let coordinator = context.coordinator
         coordinator.browser = browser
 
@@ -446,25 +476,26 @@ struct AddressField: NSViewRepresentable {
 
         if coordinator.answered != browser.focusRequest {
             coordinator.answered = browser.focusRequest
-            DispatchQueue.main.async {
-                guard !browser.commandPalette else { return }
-                field.window?.makeFirstResponder(field)
-                guard let editor = field.currentEditor() as? NSTextView else { return }
-                // The system paints selected text as a block of accent colour,
-                // which over this pale field is the loudest thing in the
-                // window. A tenth of the ink says "selected" quietly enough.
-                editor.selectedTextAttributes = [
-                    .backgroundColor: NSColor(Palette.ink.opacity(0.12)),
-                    .foregroundColor: Palette.NS.ink,
-                ]
-                // A draft come back to its blank tab is carried on, not typed
-                // over: the caret after it. An address ⌘L raises is selected whole.
-                if browser.active?.isBlank == true, !browser.typed.isEmpty {
-                    coordinator.select(from: browser.typed.count, in: field)
-                } else {
-                    editor.selectAll(nil)
-                }
-            }
+            DispatchQueue.main.async { coordinator.focus(field) }
+        }
+    }
+
+    /// The field, told when it lands in a window.
+    ///
+    /// SwiftUI makes the view and updates it before it is in one, and with
+    /// Split View on it comes only once the stage has said where the page is,
+    /// a turn of the run loop later. Asked for the keys before then, the
+    /// field had no window to ask: the request went nowhere and nothing asked
+    /// again, so ⌘T left a field with no caret and typing that went nowhere
+    /// until it was clicked. Now the request waits for the window.
+    final class Field: NSTextField {
+        var arrived: (() -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil, let arrived else { return }
+            self.arrived = nil
+            arrived()
         }
     }
 
@@ -482,6 +513,39 @@ struct AddressField: NSViewRepresentable {
 
         init(browser: Browser) {
             self.browser = browser
+        }
+
+        /// The keys to the field, now if it is in a window, or the moment it is.
+        @MainActor func focus(_ field: Field) {
+            // The command palette has the keys while it is up (see CommandPalette).
+            guard !browser.commandPalette else { return }
+            guard let window = field.window else {
+                field.arrived = { [weak self, weak field] in
+                    DispatchQueue.main.async {
+                        guard let self, let field, self.browser.fieldShowing else { return }
+                        self.focus(field)
+                    }
+                }
+                return
+            }
+            field.arrived = nil
+            window.makeFirstResponder(field)
+            guard let editor = field.currentEditor() as? NSTextView else { return }
+            defer { browser.fieldFocused(in: window) }
+            // The system paints selected text as a block of accent colour,
+            // which over this pale field is the loudest thing in the
+            // window. A tenth of the ink says "selected" quietly enough.
+            editor.selectedTextAttributes = [
+                .backgroundColor: NSColor(Palette.ink.opacity(0.12)),
+                .foregroundColor: Palette.NS.ink,
+            ]
+            // A draft come back to its blank tab is carried on, not typed
+            // over: the caret after it. An address ⌘L raises is selected whole.
+            if browser.active?.isBlank == true, !browser.typed.isEmpty {
+                select(from: browser.typed.count, in: field)
+            } else {
+                editor.selectAll(nil)
+            }
         }
 
         func controlTextDidChange(_ note: Notification) {

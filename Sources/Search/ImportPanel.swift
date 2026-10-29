@@ -14,7 +14,8 @@ struct ImportPanel: View {
     @ObservedObject var browser: Browser
 
     @State private var sources: [ImportSource] = []
-    @State private var unreadable: [String] = []
+    @State private var unreadable: [Chromium.Unavailable] = []
+    @State private var folderError: String?
     @State private var looking = true
     @State private var pick: ImportSource?
     /// Each browser's profiles, and the one used most recently.
@@ -62,7 +63,7 @@ struct ImportPanel: View {
                     Text("Looking on this Mac…").font(.system(size: 12)).foregroundStyle(Palette.muted)
                 }
             } else if sources.isEmpty {
-                Card { Nothing("No other browser found on this Mac.") }
+                Card { Nothing(unreadable.isEmpty ? "No other browser found on this Mac." : "Choose a browser's data folder below to allow Search to read it.") }
             } else {
                 Caption("On this Mac")
                 Card {
@@ -117,24 +118,17 @@ struct ImportPanel: View {
                 }
                 HStack(spacing: 8) {
                     if brought != nil {
-                        Pill("Show bookmarks") {
-                            browser.bringingIn = nil
-                            browser.bookmarking = true
-                        }
+                        Pill("Show bookmarks") { browser.lead(to: InternalPage(.bookmarks)) }
                         // The bar is off until it is asked for, and nobody asks
                         // for a row that has nothing in it. Bookmarks having just
-                        // arrived is the one moment it is worth offering, and the
-                        // sheet goes so that the bar is seen where it appears.
+                        // arrived is the one moment it is worth offering; the
+                        // bar comes in above this page, where it is seen.
                         if marksLanded, !browser.prefs.bookmarksBar {
                             Pill("Show the bookmarks bar") {
                                 withAnimation(Motion.glide) { browser.prefs.bookmarksBar = true }
-                                browser.bringingIn = nil
                             }
                         }
-                        Pill("Show passwords") {
-                            browser.bringingIn = nil
-                            browser.managing = true
-                        }
+                        Pill("Show passwords") { browser.lead(to: InternalPage(.passwords)) }
                     } else if let source = pick {
                         Pill(bringing ? "Bringing…" : "Bring them in", filled: true) { bring(from: source) }
                             .disabled(bringing || !(wantsPasswords || wantsBookmarks || wantsHistory || (wantsExtensions && !fresh(source).isEmpty)
@@ -173,23 +167,81 @@ struct ImportPanel: View {
         }
     }
 
+    /// What Arc's side of the import will do, which depends on whether pinned
+    /// rows are on: with them on, the pages Arc keeps loose become rows under
+    /// the pins and the ones it filed stay tabs in a group of that folder's
+    /// name, so that neither the keeping nor the folder is lost.
+    private func arcDetail(_ arc: (spaces: Int, pinned: Int)) -> String {
+        let spaces = arc.spaces == 1 ? "1 space" : "\(arc.spaces) spaces"
+        let head = "\(spaces), \(arc.pinned) pinned — each a space here, the favourites as pins"
+        return browser.prefs.listsPins
+            ? head + ", its pinned pages as rows under them, and the ones it filed in a folder as tabs in a group of that name"
+            : head + ", its pinned tabs asleep in it"
+    }
+
     /// Safari, and browsers on this Mac with nothing where their data should
     /// be: said by name rather than left out.
     @ViewBuilder
     private var notes: some View {
-        let lines = (ImportSource.safari
-                     ? ["Safari — macOS keeps its data from other apps: in Safari, File › Export Browsing Data, then bring the file in below."]
-                     : []) + unreadable
-        if !lines.isEmpty {
+        if ImportSource.safari || !unreadable.isEmpty || folderError != nil {
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(lines, id: \.self) { line in
-                    Text(line)
+                if ImportSource.safari {
+                    Text("Safari — macOS keeps its data from other apps: in Safari, File › Export Browsing Data, then bring the file in below.")
                         .font(.system(size: 11.5))
                         .foregroundStyle(Palette.faint)
-                        .fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(unreadable.indices, id: \.self) { index in
+                    let missing = unreadable[index]
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(missing.message)
+                        Spacer(minLength: 4)
+                        Pill("Choose folder…") { chooseFolder(for: missing.source) }
+                    }
+                }
+                if let folderError {
+                    Text(folderError)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Palette.muted)
                 }
             }
+            .font(.system(size: 11.5))
+            .foregroundStyle(Palette.faint)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.leading, 2)
+        }
+    }
+
+    /// macOS protects another app's data. Choosing its folder in the system
+    /// panel grants this browser access without asking for Full Disk Access.
+    private func chooseFolder(for source: Chromium.Source) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = source.root.deletingLastPathComponent()
+        panel.message = "Choose \(source.name)'s browser data folder"
+        panel.prompt = "Use Folder"
+        panel.begin { answer in
+            guard answer == .OK, let folder = panel.url else { return }
+            looking = true
+            DispatchQueue.global(qos: .userInitiated).async {
+                var selected = source
+                selected.rootOverride = folder.resolvingSymlinksInPath()
+                let found = !selected.profiles.isEmpty
+                DispatchQueue.main.async {
+                    guard found else {
+                        looking = false
+                        folderError = "No browser profile was found in \(folder.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")). Choose the folder that contains Default or Profile 1."
+                        return
+                    }
+                    Chromium.useForSession(folder, for: source)
+                    folderError = nil
+                    previews = [:]
+                    profiles = [:]
+                    usual = [:]
+                    look()
+                }
+            }
         }
     }
 
@@ -197,6 +249,14 @@ struct ImportPanel: View {
         let preview = previews[key(source, profile(of: source))]
         let extensions = fresh(source)
         return Card {
+            if case .chromium(let chromium) = source,
+               let root = Chromium.chosenRoot(for: chromium.name), !Store.testing {
+                Text("From \(root.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Palette.muted)
+                    .textSelection(.enabled)
+                Rule()
+            }
             if let record = ImportRecords.of(source.name) {
                 Line("Brought before", broughtBefore(record)) { EmptyView() }
                 Rule()
@@ -224,10 +284,10 @@ struct ImportPanel: View {
                 Rule()
             }
             // A kind the browser has none of is said so, and can't be picked.
-            Line("Passwords", preview?.passwords == 0 ? "None in \(source.name)" : source.asksForKey
+            Line("Passwords", !source.importsPasswords ? "Not supported for \(source.name)" : preview?.passwords == 0 ? "None in \(source.name)" : source.asksForKey
                  ? "macOS asks once for \(source.name)'s keychain key"
                  : "Read from \(source.name)'s own files, unless it has a primary password") {
-                option($wantsPasswords, none: preview?.passwords == 0)
+                option($wantsPasswords, none: !source.importsPasswords || preview?.passwords == 0)
             }
             Rule()
             Line("Bookmarks", preview?.bookmarks == 0 ? "None in \(source.name)" : "In a “\(source.name)” folder, or at the top if you have none yet") {
@@ -252,9 +312,23 @@ struct ImportPanel: View {
             // Arc's own: its spaces, what is pinned in them, its favourites.
             if let arc = arcCounts[key(source, profile(of: source))], arc.spaces + arc.pinned > 0 {
                 Rule()
-                Line("Spaces and pinned tabs",
-                     "\(arc.spaces == 1 ? "1 space" : "\(arc.spaces) spaces"), \(arc.pinned) pinned — each a space here, its pinned tabs asleep in it, the favourites as pins") {
+                Line("Spaces and pinned tabs", arcDetail(arc)) {
                     Switch(on: $wantsArc)
+                }
+                // Arc's pinned pages only keep their shape as pinned rows, and
+                // those are off until asked for. This is the moment someone
+                // would ask, so the sheet offers the switch here, once, rather
+                // than bringing them in as tabs and leaving the setting to be
+                // found afterwards.
+                if wantsArc, arc.pinned > 0, !browser.prefs.listsPins {
+                    Rule()
+                    Line("Keep them as pinned rows",
+                         "As in Arc: each pinned page a row with its name, under your pins. Turned on, it stays in Settings › Spaces & Pins › Pinned rows"
+                         + (browser.prefs.sidebar ? "" : "; rows show with the tabs down the side")) {
+                        Pill("Turn on pinned rows") {
+                            withAnimation(Motion.glide) { browser.prefs.listsPins = true }
+                        }
+                    }
                 }
             }
             if !extensions.isEmpty {
@@ -331,7 +405,7 @@ struct ImportPanel: View {
         let wanted = browser.bringingIn ?? ""
         DispatchQueue.global(qos: .userInitiated).async {
             let found = ImportSource.installed()
-            let missing = Chromium.unreadable().map { "\($0.source.name) is on this Mac, but nothing of it was found in \($0.looked)." }
+            let missing = Chromium.unreadable()
             let lists = found.map { ($0.id, $0.profiles, $0.usual) }
             DispatchQueue.main.async {
                 sources = found
@@ -373,7 +447,7 @@ struct ImportPanel: View {
         // A kind it has none of isn't read at all: no keychain question for
         // a browser with no passwords.
         let preview = previews[key(source, profile)]
-        let passwords = wantsPasswords && preview?.passwords != 0
+        let passwords = wantsPasswords && source.importsPasswords && preview?.passwords != 0
         let marks = wantsBookmarks && preview?.bookmarks != 0
         let places = wantsHistory && preview?.places != 0
         bringing = true
@@ -390,7 +464,12 @@ struct ImportPanel: View {
                         let kept = browser.keep(found)
                         ImportRecords.note(source.name, passwords: kept)
                         let skipped = found.skipped > 0 ? " (\(found.skipped.formatted()) skipped: no address)" : ""
-                        said[0] = Said(ok: true, text: (kept == 1 ? "1 password" : "\(kept.formatted()) passwords") + skipped)
+                        // Ones that didn't decrypt: said, so an import that
+                        // brought nothing says why rather than "0 passwords".
+                        let locked = found.undecrypted > 0
+                            ? " — \(found.undecrypted.formatted()) couldn't be decrypted with \(source.name)'s key" : ""
+                        said[0] = Said(ok: kept > 0 || found.undecrypted == 0,
+                                       text: (kept == 1 ? "1 password" : "\(kept.formatted()) passwords") + skipped + locked)
                     case .failure(Chromium.Trouble.noPassphrase):
                         said[0] = Said(ok: false, text: "macOS didn't hand over \(source.name)'s key — allow it and try again")
                     case .failure(Mozilla.Trouble.primaryPassword):
