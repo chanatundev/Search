@@ -1403,6 +1403,7 @@ struct ContentView: View {
         let key = event.shortcutCharacters
         // ⌃Tab, or the key Settings › Shortcuts gave the switcher instead,
         // and whether ⇧ sends it back.
+        let recent = ShortcutStore.shared.recentSwitch(event)
         // The common browser bindings for walking tabs without wrapping to a
         // distant part of the keyboard: ⇧⌃Page Up/Down and ⇧⌘↑/↓.
         // Match by key code so layouts and the arrow keys' typed characters

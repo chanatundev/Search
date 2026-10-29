@@ -3783,12 +3783,7 @@ final class Browser: NSObject, ObservableObject {
         }
     }
 
-    /// ⇧⌘W: the whole window, its tabs with it, as the red button closes it.
-    func closeWindow() {
-        window?.performClose(nil)
-    }
-
-    /// ⌘⇧W. The window closes the way its button does, so a space's tabs
+    /// ⇧⌘W: the whole window, as the red button closes it. A space's tabs
     /// stay with a window that is still open.
     func closeWindow() {
         window?.performClose(nil)

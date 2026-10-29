@@ -161,7 +161,7 @@ private struct BookmarkTile: View {
 
     @ViewBuilder
     private var tileIcon: some View {
-        if let site = bookmark.site, let icon = Favicons.shared.cached(site) {
+        if let site = bookmark.address.flatMap(Favicons.site), let icon = Favicons.shared.cached(site) {
             Image(nsImage: icon)
                 .resizable()
                 .interpolation(.high)
