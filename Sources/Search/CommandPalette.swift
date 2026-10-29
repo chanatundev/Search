@@ -207,14 +207,35 @@ struct CommandPalette: View {
         return extras
     }
 
-    private var commands: [PaletteCommand] {
-        spaceCommands + menuCommands + extraCommands
+    private var closedCommands: [PaletteCommand] {
+        browser.ghosts.reversed().prefix(5).map { ghost in
+            .init(ghost.title.isEmpty ? Address.pretty(ghost.url) : ghost.title,
+                  section: "Recently Closed", hint: "Reopen ↗", action: { browser.reopen(ghost) })
+        }
+    }
+
+    /// Open tabs and bookmarks: found by typing, never listed unasked.
+    private var pageCommands: [PaletteCommand] {
+        let tabs = browser.tabs.map { tab in
+            PaletteCommand(tab.label, section: "Tabs", keywords: tab.address?.absoluteString ?? "",
+                           hint: "Switch", action: { browser.select(tab) })
+        }
+        let saved = Self.sites(browser.bookmarks.roots).map { site in
+            PaletteCommand(site.label, section: "Bookmarks", keywords: site.url ?? "",
+                           hint: "Open ↗", action: { if let url = site.url.flatMap(URL.init(string:)) { browser.open(url, foreground: true) } })
+        }
+        return tabs + saved
+    }
+
+    private static func sites(_ nodes: [Bookmark]) -> [Bookmark] {
+        nodes.flatMap { $0.isFolder ? sites($0.children ?? []) : [$0] }
     }
 
     private var matches: [PaletteCommand] {
         let words = query.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard !words.isEmpty else { return commands }
-        return commands.filter { command in words.allSatisfy(command.matches) }
+        guard !words.isEmpty else { return closedCommands + spaceCommands + menuCommands + extraCommands }
+        return (closedCommands + pageCommands + spaceCommands + menuCommands + extraCommands)
+            .filter { command in words.allSatisfy(command.matches) }
     }
 
     var body: some View {
@@ -235,7 +256,6 @@ struct CommandPalette: View {
             searchField
             Rectangle().fill(Palette.hairline).frame(height: 1)
             commandList
-            footer
         }
         .padding(12)
         .background(Palette.ground, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -248,7 +268,7 @@ struct CommandPalette: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(Palette.muted)
-            TextField("Search commands", text: $query)
+            TextField("Search tabs, bookmarks or commands", text: $query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
                 .focused($searchFocused)
@@ -269,8 +289,7 @@ struct CommandPalette: View {
                 .foregroundStyle(Palette.muted)
         }
         .padding(.horizontal, 12)
-        .frame(height: 42)
-        .background(Palette.wash.opacity(0.7), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .frame(height: 38)
     }
 
     private var commandList: some View {
@@ -284,6 +303,14 @@ struct CommandPalette: View {
                             .frame(maxWidth: .infinity, minHeight: 64)
                     } else {
                         ForEach(Array(matches.enumerated()), id: \.element.id) { index, command in
+                            if index == 0 || matches[index - 1].section != command.section {
+                                Text(command.section)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(Palette.muted)
+                                    .padding(.horizontal, 10)
+                                    .padding(.top, index == 0 ? 2 : 10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                             row(command, selected: command.id == hoveredCommandID || (hoveredCommandID == nil && index == selected))
                                 .id(command.id)
                                 .onHover { hovering in
@@ -305,17 +332,6 @@ struct CommandPalette: View {
         }
     }
 
-    private var footer: some View {
-        HStack {
-            Text("↑ ↓ Move    Return Run")
-            Spacer()
-            Text("\(matches.count) commands")
-        }
-        .font(.system(size: 10.5))
-        .foregroundStyle(Palette.muted)
-        .padding(.top, 2)
-    }
-
     private func row(_ command: PaletteCommand, selected: Bool) -> some View {
         Button {
             run(command)
@@ -332,9 +348,11 @@ struct CommandPalette: View {
                     }
                 }
                 Spacer(minLength: 8)
-                Text(command.section)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(Palette.muted)
+                if let hint = command.hint {
+                    Text(hint)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Palette.muted)
+                }
                 if let shortcut = command.shortcut {
                     Text(shortcut)
                         .font(.system(size: 10.5, design: .monospaced))
@@ -379,9 +397,11 @@ private struct PaletteCommand: Identifiable {
     let note: String?
     let keywords: String
     let enabled: Bool
+    /// What Return does, said at the row's end (Aside's "Reopen ↗").
+    let hint: String?
     let action: () -> Void
 
-    var id: String { title }
+    var id: String { "\(section)/\(title)" }
 
     init(
         _ title: String,
@@ -390,6 +410,7 @@ private struct PaletteCommand: Identifiable {
         note: String? = nil,
         keywords: String = "",
         enabled: Bool = true,
+        hint: String? = nil,
         action: @escaping () -> Void
     ) {
         self.title = title
@@ -398,6 +419,7 @@ private struct PaletteCommand: Identifiable {
         self.note = note
         self.keywords = keywords
         self.enabled = enabled
+        self.hint = hint
         self.action = action
     }
 

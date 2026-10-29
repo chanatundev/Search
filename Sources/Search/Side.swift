@@ -885,6 +885,7 @@ private struct SideFoot: View {
     var body: some View {
         if vertical {
             VStack(spacing: 2) {
+                PaletteDoor(browser: browser)
                 FetchDoor(browser: browser, fetches: fetches)
                 ExtensionSlot(edge: prefs.sidePosition == .right ? .leading : .trailing, room: 0)
                 BookmarkDoor(browser: browser, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing)
@@ -897,11 +898,13 @@ private struct SideFoot: View {
             HStack(spacing: 2) {
                 if Profiles.shared.several { ProfileBadge(browser: browser) }
                 if prefs.usesSpaces { SpaceDot(browser: browser) }
+                if prefs.usesSpaces { SpaceDots(browser: browser) }
                 ExtensionSlot(edge: .trailing, room: room)
                 BookmarkDoor(browser: browser, arrowEdge: .trailing)
                 // Only while a download is running, and a moment after.
                 FetchDoor(browser: browser, fetches: fetches)
                 Spacer(minLength: 0)
+                PaletteDoor(browser: browser)
             }
             .padding(.horizontal, 10)
             .padding(.bottom, 10)
@@ -910,7 +913,7 @@ private struct SideFoot: View {
 
     /// How many doors the foot has, stacked: what the rows stop short of.
     @MainActor static func doors(_ prefs: Preferences, _ fetches: Fetches) -> Int {
-        var kept = 2  // the puzzle and bookmarks
+        var kept = 3  // the puzzle, bookmarks and search
         if prefs.usesSpaces { kept += 1 }
         if Profiles.shared.several { kept += 1 }
         if FetchDoor.shows(fetches, prefs) { kept += 1 }
@@ -921,11 +924,12 @@ private struct SideFoot: View {
     /// is 26 points, with 2 between them.
     private var room: Int {
         let door: CGFloat = 26 + 2
-        var kept = 2  // the puzzle and bookmarks
+        var kept = 3  // the puzzle, bookmarks and search
         if prefs.usesSpaces { kept += 1 }
         if Profiles.shared.several { kept += 1 }
         if FetchDoor.shows(fetches, prefs) { kept += 1 }
-        let free = prefs.sideWidth - 2 * 10 + 2 - CGFloat(kept) * door
+        let dots = prefs.usesSpaces ? SpaceDots.width(browser.spaces.count) : 0
+        let free = prefs.sideWidth - 2 * 10 + 2 - CGFloat(kept) * door - dots
         return max(0, Int((free / door).rounded(.down)))
     }
 }

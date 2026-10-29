@@ -603,6 +603,56 @@ struct SpaceDot: View {
     }
 }
 
+/// One small dot per space, the one you are in filled: a click goes there,
+/// and the tooltip says which it is and its ⌃ number. Only with a space to go to.
+struct SpaceDots: View {
+    @ObservedObject var browser: Browser
+
+    static func width(_ count: Int) -> CGFloat { count > 1 ? CGFloat(count) * 14 + 4 : 0 }
+
+    var body: some View {
+        if browser.spaces.count > 1 {
+            HStack(spacing: 0) {
+                ForEach(Array(browser.spaces.enumerated()), id: \.element.id) { index, space in
+                    let current = space.id == browser.spaceID
+                    Button { browser.switchSpace(to: space.id) } label: {
+                        Circle()
+                            .fill(current ? Palette.ink : Palette.faint)
+                            .frame(width: 6, height: 6)
+                            .frame(width: 14, height: 26)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(index < 9 ? "\(space.name) — ⌃\(index + 1)" : space.name)
+                }
+            }
+            .padding(.horizontal, 2)
+            .animation(Motion.quick, value: browser.spaceID)
+        }
+    }
+}
+
+/// The foot's magnifier: opens the palette, as ⌘E does.
+struct PaletteDoor: View {
+    @ObservedObject var browser: Browser
+    @State private var hovering = false
+
+    var body: some View {
+        Button { browser.commandPalette = true } label: {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(hovering ? Palette.ink : Palette.muted)
+                .frame(width: 26, height: 26)
+                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(hovering ? Palette.hover : .clear))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Search tabs, bookmarks and commands — ⌘E")
+        .animation(Motion.quick, value: hovering)
+    }
+}
+
 /// The dot's menu: the spaces, then what can be done to the one on screen.
 @MainActor
 enum SpaceMenu {
