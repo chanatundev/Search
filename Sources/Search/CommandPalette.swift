@@ -221,7 +221,7 @@ struct CommandPalette: View {
                            hint: "Switch", action: { browser.select(tab) })
         }
         let saved = Self.sites(browser.bookmarks.roots).map { site in
-            PaletteCommand(site.title, section: "Bookmarks", keywords: site.url ?? "",
+            PaletteCommand(site.label, section: "Bookmarks", keywords: site.url ?? "",
                            hint: "Open ↗", action: { if let url = site.url.flatMap(URL.init(string:)) { browser.open(url, foreground: true) } })
         }
         return tabs + saved
