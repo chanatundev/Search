@@ -4752,6 +4752,19 @@ final class Browser: NSObject, ObservableObject {
         announce(links.count == 1 ? "1 address copied" : "\(links.count) addresses copied")
     }
 
+    /// ⇧⌘↑/↓ and ⇧⌘Page Up/Down: the tab you are on moves one place back
+    /// or on in the row. Stops at the row's ends, and where moveDisplayedTab
+    /// refuses a pin beside a tab that isn't one.
+    func moveActiveTab(_ direction: Int) {
+        guard let anchor = activeSplit?.left ?? activeID,
+              let tab = tabs.first(where: { $0.id == anchor }) else { return }
+        let shown = displayedTabs
+        let representative = split(for: tab)?.left ?? tab.id
+        guard let from = shown.firstIndex(where: { $0.id == representative }),
+              shown.indices.contains(from + direction) else { return }
+        moveDisplayedTab(tab, to: from + direction)
+    }
+
     /// ⌃Tab, ⌃⇧Tab: the next tab on screen, round to the first again. It
     /// walks the whole row from the tab you are on, so it finds its way out
     /// even when that tab is one the row doesn't show.
