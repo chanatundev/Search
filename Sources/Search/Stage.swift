@@ -30,11 +30,19 @@ struct Page: View {
             // the stage was never told to take it back when it landed, and
             // the tab stayed empty. Nothing, then the page, is a change.
             if holdsPage {
-                WebStage(page: !tab.isWeb || tab.asleep || tab.floating ? nil : tab.web, corner: corner)
+                WebStage(page: !tab.isWeb || tab.asleep || tab.floating || tab.inChrome ? nil : tab.web, corner: corner)
             }
 
             if let page = tab.page, let browser {
                 InternalPageView(browser: browser, tab: tab, page: page, corner: corner)
+            }
+
+            // A page in Google Chrome: the stand-in is what is on screen in its place.
+            // Also when Chrome has let its tab go while it is on screen (asleep),
+            // so the screen says so rather than going blank.
+            if tab.inChrome {
+                ChromeStandIn(tab: tab)
+                    .transition(.opacity)
             }
 
             if let cover = tab.cover {

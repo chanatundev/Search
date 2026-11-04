@@ -28,6 +28,11 @@ enum Session {
         /// Silenced by hand from the tab's speaker or menu. False in sessions
         /// written before tabs could keep it.
         var muted: Bool = false
+        /// A tab whose page is in Google Chrome (see ChromeTabs.swift). Nil for
+        /// one of Search's own, and in sessions written before Chrome tabs.
+        var chrome: Bool? = nil
+        /// That tab's Chrome tab, while it was open there.
+        var chromeTab: String? = nil
     }
 
     struct Shape: Codable {
@@ -133,7 +138,7 @@ enum Session {
 // key it isn't asked for. In extensions, so the memberwise initialisers stay.
 
 extension Session.Entry {
-    private enum Keys: String, CodingKey { case url, title, pin, name, home, groupID, pinID, touched, letGo, listed, muted }
+    private enum Keys: String, CodingKey { case url, title, pin, name, home, groupID, pinID, touched, letGo, listed, muted, chrome, chromeTab }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
@@ -148,6 +153,8 @@ extension Session.Entry {
         letGo = try? c.decodeIfPresent(Date.self, forKey: .letGo)
         listed = try? c.decodeIfPresent(Bool.self, forKey: .listed)
         muted = (try? c.decodeIfPresent(Bool.self, forKey: .muted)) ?? false
+        chrome = try? c.decodeIfPresent(Bool.self, forKey: .chrome)
+        chromeTab = try? c.decodeIfPresent(String.self, forKey: .chromeTab)
     }
 }
 

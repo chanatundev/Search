@@ -9,5 +9,9 @@
   <!-- Likewise for a page asking where you are, which Search puts to you
        first, site by site (see Browser.askedForLocation). -->
   <key>com.apple.security.personal-information.location</key><true/>
+  <!-- Google Chrome tabs (⌃⌘T) are opened, read and closed through Chrome's own
+       scripting, which the hardened runtime refuses unless the app says so.
+       macOS asks once whether Search may control Chrome (ChromeTabs.swift). -->
+  <key>com.apple.security.automation.apple-events</key><true/>
 </dict>
 </plist>

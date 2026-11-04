@@ -229,6 +229,12 @@ final class Preferences: ObservableObject {
     @Published var lazyTabs: Bool {
         didSet { store.set(lazyTabs, forKey: "tabs.lazy") }
     }
+    /// ⌃⌘T opens a tab whose page is in Google Chrome (see ChromeTabs.swift).
+    /// Off unless asked for: it drives another app, which is not something to
+    /// do unasked.
+    @Published var chromeTabs: Bool {
+        didSet { store.set(chromeTabs, forKey: "tabs.chrome") }
+    }
     /// Closing the last tab that isn't a pin, with pins beside it, leaves a
     /// new tab instead of taking you to a pin (see Browser.close, #537).
     /// Off unless asked for.
@@ -677,6 +683,7 @@ final class Preferences: ObservableObject {
         tabLife = TabLife(rawValue: store.integer(forKey: "tabs.close.after")) ?? .never
         sleepPace = SleepPace.chosen
         lazyTabs = store.bool(forKey: "tabs.lazy")
+        chromeTabs = store.bool(forKey: "tabs.chrome")
         newTabAfterLast = store.bool(forKey: "tabs.newAfterLast")
         closeGoesBack = store.bool(forKey: "tabs.closeGoesBack")
         newTabPlace = store.string(forKey: "tabs.newPlace").flatMap(NewTabPlace.init(rawValue:)) ?? .next

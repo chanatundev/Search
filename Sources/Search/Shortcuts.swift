@@ -223,6 +223,12 @@ struct Command: Identifiable {
             guard browser.prefs.splitView else { return }
             browser.startSplit()
         },
+        // ⌃⌘T: a tab whose page is in Google Chrome (see ChromeTabs.swift). Off
+        // until Settings › Tabs turns it on, and the key goes to the page then.
+        Command("tabs.chrome", "New Google Chrome Tab", .tabs, KeyCombo("t", control: true)) { browser in
+            guard browser.prefs.chromeTabs else { return }
+            browser.newChromeTab()
+        },
         Command("tabs.focusLeftPane", "Focus Left Page", .tabs, KeyCombo("left", control: true)) { browser in
             guard browser.prefs.splitView else { return }
             browser.focusPane(onLeft: true)
@@ -501,4 +507,6 @@ extension Command {
     static let ai: Set<String> = ["view.summarize", "view.ask"]
     /// Dark pages': with them off, not listed, and their keys go on to the page.
     static let dusk: Set<String> = ["view.dusk", "view.duskPause"]
+    /// Google Chrome tabs': with them off, not listed, and ⌃⌘T goes to the page.
+    static let chrome: Set<String> = ["tabs.chrome"]
 }

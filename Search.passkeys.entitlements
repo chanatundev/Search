@@ -9,6 +9,9 @@
   <!-- Likewise for a page asking where you are, which Search puts to you
        first, site by site (see Browser.askedForLocation). -->
   <key>com.apple.security.personal-information.location</key><true/>
+  <!-- Google Chrome tabs (⌃⌘T) are driven through Chrome's scripting; see
+       Search.entitlements. -->
+  <key>com.apple.security.automation.apple-events</key><true/>
   <!-- Passkeys, for any site. Apple grants this to browsers on request; it
        only works with the matching Developer ID provisioning profile
        embedded in the app, which build.sh does when Search.provisionprofile

@@ -228,6 +228,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <string>Websites you visit can ask for your location. Search asks you each time a site does, unless you choose Always allow for it; Settings › Privacy forgets those choices.</string>
   <key>NSDownloadsFolderUsageDescription</key>
   <string>Files you download are saved to your Downloads folder.</string>
+  <!-- Asked for the first time a Google Chrome tab is opened (⌃⌘T), and only
+       once Settings › Tabs turns those on. -->
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Search opens, shows and closes your Google Chrome tabs through Chrome, when you use ⌃⌘T. Settings › Tabs turns those on.</string>
 </dict>
 </plist>
 PLIST

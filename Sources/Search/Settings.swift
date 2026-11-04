@@ -568,6 +568,7 @@ struct SettingsPanel: View {
         case "tabs.closeGoesBack": Switch(on: $prefs.closeGoesBack)
         case "tabs.lazy": Switch(on: $prefs.lazyTabs)
         case "tabs.popupWindows": Switch(on: $prefs.popupWindows)
+        case "tabs.chrome": Switch(on: $prefs.chromeTabs)
         case "tabs.sleep":
             VStack(alignment: .leading, spacing: 7) {
                 Segmented(options: SleepChoice.allCases.map { ($0, $0.title) }, selection: $prefs.sleepChoice, wide: true)

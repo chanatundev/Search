@@ -183,7 +183,9 @@ extension Browser {
     func sleepShut(again: Bool = true) {
         guard prefs.sleepsTabs, shut else { return }
         var loading = false
-        for tab in tabs + parkedTabs {
+        // A page in Chrome stays open there when the last window closes: a
+        // window closing doesn't close what is open in another app.
+        for tab in tabs + parkedTabs where !tab.inChrome {
             if awake(because: tab) == "still loading" { loading = true }
             sleep(tab)
         }
@@ -206,6 +208,8 @@ extension Browser {
         if tab.bench { return "a bench tab" }
         if tab.isBlank { return "blank" }
         if tab.asleep { return "already asleep" }
+        // Its page is in Chrome: there is no view to judge, only what Chrome said.
+        if tab.inChrome { return chromeAwake(tab) }
         guard tab.built != nil else { return "no page" }
         if tab.loading { return "still loading" }
         return busy(tab)
@@ -267,12 +271,27 @@ extension Browser {
         return nil
     }
 
+    /// Why a tab whose page is in Chrome stays awake. Chrome can't be asked
+    /// whether something is typed, so this is the only thing that holds it:
+    /// being opened, a site kept awake, and being looked at in Chrome.
+    private func chromeAwake(_ tab: Tab) -> String? {
+        if keepsAwake(tab) { return "kept awake for this site" }
+        if tab.chromeTab == nil { return "opening in Chrome" }
+        return tab.chromeInFront ? "in front in Chrome" : nil
+    }
+
     /// Asks the page whether it holds anything typed, pictures it, then lets
     /// it go — looking again at each step, since each takes a moment and you
     /// may have gone back to the tab in the meantime.
     func sleep(_ tab: Tab, done: ((String) -> Void)? = nil) {
         if let reason = awake(because: tab) {
             done?(reason)
+            return
+        }
+        // Its Chrome tab is closed, and Chrome quits when no other is left awake.
+        if tab.inChrome {
+            if let id = tab.leaveChrome() { ChromeTabs.release(id, quitWhenNoneLeft: true) }
+            done?("asleep")
             return
         }
         tab.unsaved { [weak self, weak tab] typed in

@@ -766,6 +766,21 @@ final class Tab: ObservableObject, Identifiable {
 
     private var watch: [NSKeyValueObservation] = []
 
+    /// The page is in Google Chrome rather than here (see ChromeTabs.swift).
+    /// Kept through sleep, so the tab wakes in Chrome again.
+    @Published private(set) var inChrome = false
+    /// The Chrome tab showing the page, while it is open there.
+    @Published private(set) var chromeTab: String?
+    /// Whether Chrome had this tab in front at the last look. Looking at it in
+    /// Chrome is looking at it, so its clock is kept running (see touch).
+    private(set) var chromeInFront = false
+    /// Closed while its Chrome tab was still being opened: the tab Chrome makes
+    /// is closed again as soon as it says so.
+    private var goneWhileOpening = false
+    /// An address typed while the Chrome tab was still being opened, to go to
+    /// as soon as it is.
+    private var chromeWanted: URL?
+
     /// A tab that has never been anywhere shows the address field instead of a
     /// page. It still owns a web view — built now, warm by the time it's needed.
     var isBlank: Bool { address == nil && page == nil }
@@ -1328,7 +1343,42 @@ final class Tab: ObservableObject, Identifiable {
         if fraction != reading { reading = fraction }
     }
 
+    /// An address typed into a tab whose page is in Chrome goes to Chrome. One
+    /// of Search's own pages is not on the web: the tab comes back to Search,
+    /// and its Chrome tab is closed.
+    private func goInChrome(_ url: URL) {
+        address = url
+        title = ""
+        failure = nil
+        reading = 0
+        reader = false
+        typing = false
+        immersed = false
+        draft = ""
+        adoptIcon()
+        if let id = chromeTab {
+            ChromeTabs.navigate(id, to: url)
+        } else if pending != nil {
+            // Asleep: it opens at the new address, in Chrome, without Chrome
+            // being brought forward.
+            openInChrome(url, activate: false)
+        } else {
+            // Still opening: it goes there once Chrome has it.
+            chromeWanted = url
+        }
+    }
+
     func go(to url: URL) {
+        if inChrome {
+            guard InternalPage(url: url) == nil else {
+                if let id = leaveChrome() { ChromeTabs.release(id, quitWhenNoneLeft: false) }
+                inChrome = false
+                go(to: url)
+                return
+            }
+            goInChrome(url)
+            return
+        }
         if let own = InternalPage(url: url) {
             show(own)
             return
@@ -1393,6 +1443,87 @@ final class Tab: ObservableObject, Identifiable {
     /// brought back from the last session, or put down with ⌘W while pinned.
     var asleep: Bool { pending != nil }
 
+    // MARK: - In Google Chrome (see ChromeTabs.swift)
+
+    /// Opens the page in Chrome at `url`, or at Chrome's new tab page. A tab
+    /// that was asleep is awake again the moment this starts: the stand-in says
+    /// it is opening until Chrome answers.
+    func openInChrome(_ url: URL?, activate: Bool) {
+        inChrome = true
+        pending = nil
+        chromeTab = nil
+        chromeWanted = nil
+        ChromeTabs.attach(self, url: url, activate: activate)
+    }
+
+    /// Chrome made the tab. An address typed while it was opening goes there now.
+    func chromeOpened(_ id: String) {
+        if goneWhileOpening {
+            ChromeTabs.release(id, quitWhenNoneLeft: false)
+            return
+        }
+        chromeTab = id
+        chromeInFront = false
+        if let url = chromeWanted {
+            chromeWanted = nil
+            ChromeTabs.navigate(id, to: url)
+        }
+    }
+
+    /// Chrome couldn't open it. A tab that had an address goes back to sleep
+    /// with it, so selecting it tries again; one that had none is a new tab
+    /// again, in Search's own view.
+    func chromeFailed() {
+        chromeWanted = nil
+        if !goneWhileOpening { leaveChrome() }
+    }
+
+    /// Let go of its Chrome tab, as a page is put to sleep: the tab is no longer
+    /// awake, and keeps its address to wake with. Returns the Chrome tab that
+    /// was showing it, for the caller to close.
+    @discardableResult
+    func leaveChrome() -> String? {
+        // A page in WebKit is nobody's business here.
+        guard inChrome else { return nil }
+        let id = chromeTab
+        chromeTab = nil
+        chromeInFront = false
+        if address != nil {
+            pending = pending ?? address
+        } else {
+            inChrome = false
+            pending = nil
+        }
+        return id
+    }
+
+    /// Chrome's word about the tab at a look: where it is, what it calls itself,
+    /// and whether it is the one in front. Looking at it in Chrome counts as
+    /// looking at it, so it doesn't go to sleep under the person reading it.
+    func chromeSaid(url: URL?, title: String, inFront: Bool) {
+        if let url, url != address {
+            address = url
+            adoptIcon()
+        }
+        if title != self.title { self.title = title }
+        chromeInFront = inFront
+        if inFront { touch() }
+    }
+
+    /// Brought back from the last session. With the id of a Chrome tab it is
+    /// awake until the next look says whether Chrome still has that tab; without
+    /// one it is asleep, like any tab brought back.
+    func restoreInChrome(tabID: String?) {
+        inChrome = true
+        pending = nil
+        chromeTab = nil
+        if let tabID {
+            chromeTab = tabID
+        } else {
+            leaveChrome()
+        }
+    }
+
     /// ⌘W on a pinned tab. The letter keeps its place in the row and the
     /// address is remembered; everything the page was holding is let go, so a
     /// pin you are not reading costs a line in a file and nothing else.
@@ -1400,6 +1531,9 @@ final class Tab: ObservableObject, Identifiable {
     /// that goes back to its pinned page once closed (see Preferences.pinsGoHome).
     func rest(at home: URL? = nil) {
         guard let url = home ?? address else { return }
+        // A page in Chrome is let go there too, and Chrome quits if nothing
+        // else is left awake in it, as for any sleep.
+        if inChrome, let id = leaveChrome() { ChromeTabs.release(id, quitWhenNoneLeft: true) }
         // The title was the page it is leaving; the host stands in until the
         // pinned page is woken and names itself.
         if let home, address != home {
@@ -1633,6 +1767,8 @@ final class Tab: ObservableObject, Identifiable {
     /// Asked anything at all, the page answers with one particular error, and
     /// the answer to that is to load it again.
     func revive() {
+        // A page in Chrome has no view here: there is nothing to bring back.
+        guard !inChrome else { return }
         if stale {
             stale = false
             recoverFromCrash()
@@ -1665,6 +1801,11 @@ final class Tab: ObservableObject, Identifiable {
     func wake() -> Bool {
         guard let url = pending else { return false }
         pending = nil
+        // Asleep in Chrome: it opens there again, in the background.
+        if inChrome {
+            openInChrome(url, activate: false)
+            return true
+        }
         failure = nil
         reading = 0
         reader = false
@@ -1717,6 +1858,11 @@ final class Tab: ObservableObject, Identifiable {
         // A pin put down with ⌘W has no view left to reload; waking it is
         // the reload.
         guard !wake() else { return }
+        // A page in Chrome is reloaded there; there is no view here to reload.
+        if inChrome {
+            if let chromeTab { ChromeTabs.reload(chromeTab) }
+            return
+        }
         reader = false
         // A file is read again with the folder it may read (see open).
         if let address, hollow || address.isFileURL {
@@ -1727,10 +1873,15 @@ final class Tab: ObservableObject, Identifiable {
             web.reload()
         }
     }
-    func stop() { web.stopLoading() }
+    func stop() {
+        guard !inChrome else { return }
+        web.stopLoading()
+    }
     /// Straight through, every time. A page that has to be fetched again is
     /// fetched again — nothing is kept behind to make that look otherwise.
     func back() {
+        // A page in Chrome keeps its own history there.
+        guard !inChrome else { return }
         if let page {
             guard let last = trail.popLast() else { return }
             ahead.append(page)
@@ -1748,6 +1899,7 @@ final class Tab: ObservableObject, Identifiable {
         web.goBack()
     }
     func forward() {
+        guard !inChrome else { return }
         if let page {
             guard let next = ahead.popLast() else { return }
             trail.append(page)
@@ -1773,6 +1925,10 @@ final class Tab: ObservableObject, Identifiable {
     /// Called when the tab is thrown away. Without it the view keeps running
     /// whatever the page left behind — timers, video, sockets.
     func close() {
+        // Its Chrome tab goes too; Chrome itself stays open for what else is in it.
+        let opening = inChrome && chromeTab == nil && pending == nil
+        if let id = leaveChrome() { ChromeTabs.release(id, quitWhenNoneLeft: false) }
+        goneWhileOpening = opening
         onZoom = nil
         onLink = nil
         onPick = nil

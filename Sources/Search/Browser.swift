@@ -3223,7 +3223,11 @@ final class Browser: NSObject, ObservableObject {
                 touched: visibleTabIDs.contains(tab.id) ? Date() : tab.touched,
                 letGo: tab.pin == nil ? tab.letGo : nil,
                 listed: tab.pin != nil && tab.listed ? true : nil,
-                muted: tab.muted
+                muted: tab.muted,
+                // Kept with its Chrome tab's id, so the same tab is found again
+                // if Chrome still has it when Search opens (see ChromeTabs.swift).
+                chrome: tab.inChrome ? true : nil,
+                chromeTab: tab.inChrome ? tab.chromeTab : nil
             ))
         }
         // The tab you were on isn't kept — a private one: the one kept just
@@ -3655,6 +3659,33 @@ final class Browser: NSObject, ObservableObject {
         focusRequest += 1
         rememberSession()
         if #available(macOS 15.4, *) { Extensions.shared.offerNewTabPage(into: tab) }
+    }
+
+    /// ⌃⌘T: a new tab whose page is in Google Chrome (see ChromeTabs.swift). It
+    /// is a row like any other, and Chrome is brought forward on it. Not from a
+    /// private tab: Chrome's own tabs keep what they are, and aren't private.
+    func newChromeTab() {
+        guard prefs.chromeTabs else { return }
+        guard active?.shy != true else {
+            announce("Google Chrome tabs aren't private")
+            return
+        }
+        guard ChromeTabs.isInstalled else {
+            announce("Google Chrome isn't installed")
+            return
+        }
+        let tab = Tab(configuration: Web.configuration(space: spaceID))
+        prepare(tab)
+        if prefs.usesTabGroups, let active, !active.shy, !active.bench { tab.groupID = active.groupID }
+        tabs.insert(tab, at: placeForFront())
+        leaving()
+        activeID = tab.id
+        summoning = false
+        typed = ""
+        editing = false
+        tab.touch()
+        tab.openInChrome(nil, activate: true)
+        rememberSession()
     }
 
     /// A new tab given an extension's new tab page, whether blank or showing
@@ -5391,6 +5422,10 @@ final class Browser: NSObject, ObservableObject {
             let tab = Tab(configuration: Web.configuration(space: space))
             prepare(tab)
             tab.restore(url: url, title: url == saved ? entry.title : url.host ?? "", name: entry.name)
+            if entry.chrome == true {
+                tab.restoreInChrome(tabID: entry.chromeTab)
+                ChromeTabs.watch()
+            }
             // Never later than now: a clock set wrong once would keep the tab forever.
             if let touched = entry.touched { tab.touch(at: min(touched, Date())) }
             tab.letGo = entry.letGo.map { min($0, Date()) }

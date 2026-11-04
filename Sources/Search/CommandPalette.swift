@@ -87,6 +87,8 @@ struct CommandPalette: View {
             if Command.split.contains(command.id), !browser.prefs.splitView { return nil }
             // Filter AI commands if AI disabled
             if Command.ai.contains(command.id), !browser.prefs.ai { return nil }
+            // Filter Google Chrome tabs if they are off
+            if Command.chrome.contains(command.id), !browser.prefs.chromeTabs { return nil }
 
             let shortcut = ShortcutStore.shared.key(for: command.id)?.display
 

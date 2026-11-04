@@ -251,6 +251,10 @@ struct SearchApp: App {
                 Button("Search Tabs…") { browser.summon() }
                     .shortcut("tabs.search")
                 Divider()
+                if browser.prefs.chromeTabs {
+                    Button("New Google Chrome Tab") { browser.newChromeTab() }
+                        .shortcut("tabs.chrome")
+                }
                 if browser.prefs.splitView {
                     Button("Split Current Page") { browser.startSplit() }
                         .shortcut("tabs.split")
@@ -1644,6 +1648,7 @@ struct ContentView: View {
                 if Command.split.contains(command.id), !browser.prefs.splitView { return false }
                 if Command.ai.contains(command.id), !browser.prefs.ai { return false }
                 if Command.dusk.contains(command.id), !browser.prefs.darkensPages { return false }
+                if Command.chrome.contains(command.id), !browser.prefs.chromeTabs { return false }
                 command.run(browser)
                 return true
             }
