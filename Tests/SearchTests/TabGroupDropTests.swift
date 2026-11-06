@@ -9,10 +9,20 @@ final class TabGroupDropTests: XCTestCase {
         super.setUp()
     }
 
-    func testPositionalMovesAndSourceCleanup() throws {
+    private func makeBrowser() -> Browser {
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.prohibited)
         let browser = Browser(record: WindowRecord())
+        browser.leaveFiles()
+        browser.closeAll()
+        browser.tabGroups = []
+        browser.record.rows = [:]
+        browser.parked = [:]
+        return browser
+    }
+
+    func testPositionalMovesAndSourceCleanup() throws {
+        let browser = makeBrowser()
         let grouped = browser.prefs.usesTabGroups
         let split = browser.prefs.splitView
         defer {
@@ -21,7 +31,7 @@ final class TabGroupDropTests: XCTestCase {
         }
         browser.prefs.usesTabGroups = true
         for number in 0..<6 {
-            if number > 0 { browser.newTab() }
+            browser.newTab()
             browser.tabs.last?.restore(url: URL(string: "https://\(number).example/")!, title: "\(number)")
         }
         let tabs = browser.tabs
@@ -104,5 +114,99 @@ final class TabGroupDropTests: XCTestCase {
             XCTAssertEqual(GroupDropFrames.resolve(point(40), frames: frames, groups: [collapsed],
                                                     excluding: source, vertical: vertical), GroupDropTarget(group: group.id))
         }
+    }
+
+    func testMultiTabGroupCreationAndMovement() throws {
+        let browser = makeBrowser()
+        let grouped = browser.prefs.usesTabGroups
+        defer { browser.prefs.usesTabGroups = grouped }
+        browser.prefs.usesTabGroups = true
+
+        for number in 0..<6 {
+            browser.newTab()
+            browser.tabs.last?.restore(url: URL(string: "https://\(number).example/")!, title: "\(number)")
+        }
+        let tabs = browser.tabs
+
+        let group1 = browser.addTabGroup(containing: [tabs[1], tabs[2], tabs[4]])
+        XCTAssertEqual(browser.tabGroups.count, 1)
+        XCTAssertEqual(browser.tabs(in: group1).map(\.id), [tabs[1].id, tabs[2].id, tabs[4].id])
+        XCTAssertEqual(tabs[1].groupID, group1)
+        XCTAssertEqual(tabs[2].groupID, group1)
+        XCTAssertEqual(tabs[4].groupID, group1)
+        XCTAssertNil(tabs[0].groupID)
+        XCTAssertNil(tabs[3].groupID)
+        XCTAssertNil(tabs[5].groupID)
+
+        browser.move([tabs[0], tabs[3]], toGroup: group1)
+        XCTAssertEqual(tabs[0].groupID, group1)
+        XCTAssertEqual(tabs[3].groupID, group1)
+        XCTAssertEqual(browser.tabs(in: group1).count, 5)
+
+        let group2 = browser.addTabGroup(containing: [tabs[0], tabs[1]])
+        XCTAssertEqual(browser.tabGroups.count, 2)
+        XCTAssertEqual(browser.tabs(in: group2).map(\.id), [tabs[1].id, tabs[0].id])
+        XCTAssertEqual(browser.tabs(in: group1).map(\.id), [tabs[2].id, tabs[4].id, tabs[3].id])
+
+        browser.move([tabs[2], tabs[4]], toGroup: nil)
+        XCTAssertNil(tabs[2].groupID)
+        XCTAssertNil(tabs[4].groupID)
+        XCTAssertEqual(browser.tabs(in: group1).map(\.id), [tabs[3].id])
+
+        browser.move([tabs[3]], toGroup: nil)
+        XCTAssertNil(tabs[3].groupID)
+        XCTAssertFalse(browser.tabGroups.contains { $0.id == group1 })
+        XCTAssertEqual(browser.tabGroups.count, 1)
+        XCTAssertEqual(browser.tabGroups.first?.id, group2)
+    }
+
+    func testMultiTabDropMovement() throws {
+        let browser = makeBrowser()
+        let grouped = browser.prefs.usesTabGroups
+        defer { browser.prefs.usesTabGroups = grouped }
+        browser.prefs.usesTabGroups = true
+
+        for number in 0..<6 {
+            browser.newTab()
+            browser.tabs.last?.restore(url: URL(string: "https://\(number).example/")!, title: "\(number)")
+        }
+        let tabs = browser.tabs
+        let group = browser.addTabGroup(containing: tabs[0])
+
+        browser.select(tabs[1])
+        browser.extendTabSelection(to: tabs[2], modifiers: .command)
+        XCTAssertEqual(browser.selectedTabIDs, Set([tabs[1].id, tabs[2].id]))
+
+        browser.move(tabs[1], toGroup: GroupDropTarget(group: group, member: tabs[0].id, after: true))
+        XCTAssertEqual(browser.tabs(in: group).map(\.id), [tabs[0].id, tabs[1].id, tabs[2].id])
+
+        browser.select(tabs[4])
+        browser.extendTabSelection(to: tabs[5], modifiers: .command)
+
+        browser.move(tabs[5], toGroup: GroupDropTarget(group: group, member: tabs[0].id, after: false))
+        XCTAssertEqual(browser.tabs(in: group).map(\.id), [tabs[4].id, tabs[5].id, tabs[0].id, tabs[1].id, tabs[2].id])
+    }
+
+    func testMultiTabResolveExclusion() {
+        let group = TabGroup(id: UUID(), name: "Group", collapsed: false)
+        let tabA = UUID(), tabB = UUID(), tabC = UUID()
+        let rect: (CGFloat, CGFloat) -> CGRect = { start, length in
+            CGRect(x: 10, y: start, width: 80, height: length)
+        }
+        let frames = [
+            group.id: GroupDropFrame(group: group.id, rect: rect(-40, 20)),
+            tabA: GroupDropFrame(group: group.id, tab: tabA, rect: rect(-10, 30)),
+            tabB: GroupDropFrame(group: group.id, tab: tabB, rect: rect(30, 80)),
+            tabC: GroupDropFrame(group: group.id, tab: tabC, rect: rect(120, 30))
+        ]
+        let point = CGPoint(x: 30, y: -5.0)
+        let singleExclude = GroupDropFrames.resolve(point, frames: frames, groups: [group],
+                                                   excluding: tabB, vertical: true)
+        XCTAssertEqual(singleExclude, GroupDropTarget(group: group.id, member: tabA))
+
+        let multiExclude = GroupDropFrames.resolve(point, frames: frames, groups: [group],
+                                                  excluding: Set([tabA, tabB]), vertical: true)
+        XCTAssertNotEqual(multiExclude?.member, tabA)
+        XCTAssertNotEqual(multiExclude?.member, tabB)
     }
 }

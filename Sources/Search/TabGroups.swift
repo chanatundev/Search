@@ -22,11 +22,11 @@ struct GroupDropFrames: PreferenceKey {
     }
 
     static func resolve(_ point: CGPoint, frames: [UUID: GroupDropFrame],
-                        groups: [TabGroup], excluding source: UUID, vertical: Bool) -> GroupDropTarget? {
+                        groups: [TabGroup], excluding sources: Set<UUID>, vertical: Bool) -> GroupDropTarget? {
         // Model group order gives overlapping regions a deterministic priority.
         for group in groups {
             let heading = frames[group.id]?.rect
-            let members = frames.values.filter { $0.group == group.id && $0.tab != nil && $0.tab != source }
+            let members = frames.values.filter { $0.group == group.id && $0.tab != nil && !sources.contains($0.tab!) }
                 .sorted { vertical ? $0.rect.minY < $1.rect.minY : $0.rect.minX < $1.rect.minX }
             let extent = members.reduce(heading ?? .null) { $0.union($1.rect) }
             guard extent.contains(point) else { continue }
@@ -40,6 +40,11 @@ struct GroupDropFrames: PreferenceKey {
             return GroupDropTarget(group: group.id, member: members.last?.tab, after: true)
         }
         return nil
+    }
+
+    static func resolve(_ point: CGPoint, frames: [UUID: GroupDropFrame],
+                        groups: [TabGroup], excluding source: UUID, vertical: Bool) -> GroupDropTarget? {
+        resolve(point, frames: frames, groups: groups, excluding: [source], vertical: vertical)
     }
 }
 

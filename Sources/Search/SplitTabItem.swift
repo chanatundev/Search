@@ -269,7 +269,7 @@ private struct SplitTabHalf: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(height: stacked ? height : 16)
                 .contentShape(Rectangle())
-                .modifier(TabPress(enabled: stacked && interactive && !editing, active: focused, selected: $selectedOnPress) {
+                .modifier(TabPress(enabled: stacked && interactive && !editing && !(browser.selectedTabIDs.contains(tab.id) && browser.selectedTabs.count > 1), active: focused, selected: $selectedOnPress) {
                     browser.clearTabSelection()
                     browser.focusPane(tab)
                 })

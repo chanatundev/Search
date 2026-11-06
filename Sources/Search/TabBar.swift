@@ -359,8 +359,10 @@ struct TabBar: View {
 
     private func destination(_ tab: Tab, at point: CGPoint) -> GroupDropTarget? {
         guard browser.prefs.usesTabGroups, tab.pin == nil else { return nil }
+        let actionTabs = browser.tabsForAction(on: tab)
+        let excluding = actionTabs.count > 1 ? Set(actionTabs.map(\.id)) : [tab.id]
         return GroupDropFrames.resolve(point, frames: groupFrames, groups: browser.tabGroups,
-                                       excluding: tab.id, vertical: false)
+                                       excluding: excluding, vertical: false)
     }
 
     private func drop(_ tab: Tab, at point: CGPoint) {
@@ -1231,17 +1233,22 @@ struct TabMenu: View {
 
     @ViewBuilder
     private var singleMenu: some View {
-        if browser.prefs.usesTabGroups && tab.pin == nil && !tab.shy && !tab.bench {
-            Menu("Move to Group") {
-                Button("New Group") { browser.addTabGroup(containing: tab) }
+        let groupable = actionTabs.filter { $0.pin == nil && !$0.shy && !$0.bench }
+        if browser.prefs.usesTabGroups && !groupable.isEmpty {
+            Menu(groupable.count > 1 ? "Move \(groupable.count) Tabs to Group" : "Move to Group") {
+                Button(groupable.count > 1 ? "New Group with \(groupable.count) Tabs" : "New Group") {
+                    browser.addTabGroup(containing: groupable)
+                }
                 if !browser.tabGroups.isEmpty { Divider() }
                 ForEach(browser.tabGroups) { group in
-                    Button(group.name) { browser.move(tab, toGroup: group.id) }
-                        .disabled(tab.groupID == group.id)
+                    Button(group.name) { browser.move(groupable, toGroup: group.id) }
+                        .disabled(groupable.allSatisfy { $0.groupID == group.id })
                 }
-                if tab.groupID != nil {
+                if groupable.contains(where: { $0.groupID != nil }) {
                     Divider()
-                    Button("Remove from Group") { browser.move(tab, toGroup: nil) }
+                    Button(groupable.count > 1 ? "Remove \(groupable.count) Tabs from Group" : "Remove from Group") {
+                        browser.move(groupable, toGroup: nil)
+                    }
                 }
             }
         }

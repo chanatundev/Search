@@ -53,8 +53,13 @@ final class TabSelectionTests: XCTestCase {
 
     private func makeBrowser() -> Browser {
         let browser = Browser(record: WindowRecord())
+        browser.leaveFiles()
+        browser.closeAll()
+        browser.record.rows = [:]
+        browser.parked = [:]
+        browser.tabGroups = []
         for word in ["one", "two", "three", "four"] {
-            if browser.tabs.last?.isBlank == false { browser.newTab() }
+            browser.newTab()
             browser.tabs.last?.restore(url: URL(string: "https://\(word).example/")!, title: word)
         }
         return browser

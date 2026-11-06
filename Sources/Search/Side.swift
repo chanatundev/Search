@@ -681,8 +681,10 @@ struct SideBar: View {
 
     private func destination(_ tab: Tab, at point: CGPoint) -> GroupDropTarget? {
         guard prefs.usesTabGroups, tab.pin == nil else { return nil }
+        let actionTabs = browser.tabsForAction(on: tab)
+        let excluding = actionTabs.count > 1 ? Set(actionTabs.map(\.id)) : [tab.id]
         return GroupDropFrames.resolve(point, frames: groupFrames, groups: browser.tabGroups,
-                                       excluding: tab.id, vertical: true)
+                                       excluding: excluding, vertical: true)
     }
 
     private func drop(_ tab: Tab, at point: CGPoint) {
@@ -1128,7 +1130,7 @@ private struct SideRow: View {
             .padding(.trailing, status || peeking ? 0 : 10)
             .frame(height: prefs.sideRow)
             .contentShape(Rectangle())
-            .modifier(TabPress(enabled: interactive && !editing, active: live, selected: $selectedOnPress, pressing: $pressed) {
+            .modifier(TabPress(enabled: interactive && !editing && !(browser.selectedTabIDs.contains(tab.id) && browser.selectedTabs.count > 1), active: live, selected: $selectedOnPress, pressing: $pressed) {
                 browser.clearTabSelection()
                 browser.select(tab)
             })

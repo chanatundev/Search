@@ -163,7 +163,7 @@ struct IconTile: View {
         }
         .modifier(Give(pressed: pressed && prefs.tabsGive))
         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .modifier(TabPress(enabled: interactive, active: live, selected: $selectedOnPress, pressing: $pressed) {
+        .modifier(TabPress(enabled: interactive && !(browser.selectedTabIDs.contains(tab.id) && browser.selectedTabs.count > 1), active: live, selected: $selectedOnPress, pressing: $pressed) {
             browser.clearTabSelection()
             browser.select(tab)
         })

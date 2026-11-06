@@ -4470,15 +4470,20 @@ final class Browser: NSObject, ObservableObject {
 
     /// A section can be made empty, then filled from a tab's menu.
     @discardableResult
-    func addTabGroup(containing tab: Tab) -> UUID {
+    func addTabGroup(containing tabsToGroup: [Tab]) -> UUID {
         let id = UUID()
         tabGroups.append(TabGroup(id: id, name: "Group \(tabGroups.count + 1)", collapsed: false))
         editingGroupID = id
-        move(tab, toGroup: id)
+        move(tabsToGroup, toGroup: id)
         // A tab that can't be in a group (a pin, a private one) leaves none behind.
         removeEmptyGroup(id)
         writeSession(now: true)
         return id
+    }
+
+    @discardableResult
+    func addTabGroup(containing tab: Tab) -> UUID {
+        addTabGroup(containing: [tab])
     }
 
     func renameTabGroup(_ id: UUID, to name: String) {
@@ -4537,20 +4542,31 @@ final class Browser: NSObject, ObservableObject {
         writeSession(now: true)
     }
 
-    func move(_ tab: Tab, toGroup id: UUID?) {
-        guard tabs.contains(where: { $0.id == tab.id }), tab.pin == nil, !tab.shy, !tab.bench,
-              id == nil || tabGroups.contains(where: { $0.id == id }) else { return }
-        let previousGroup = tab.groupID
-        guard previousGroup != id else { return }
-        // A pair is one place in the row: moved into a group or out of one,
-        // both halves go, and stay a pair. Dragged apart in the row, one
-        // half leaves on its own (see dropTabIntoStrip).
-        let partner = split(for: tab).flatMap { pair in
-            tabs.first { $0.id == (pair.left == tab.id ? pair.right : pair.left) }
+    func move(_ movingTabs: [Tab], toGroup id: UUID?) {
+        guard id == nil || tabGroups.contains(where: { $0.id == id }) else { return }
+        let targets = movingTabs.filter { tab in
+            tabs.contains(where: { $0.id == tab.id }) && tab.pin == nil && !tab.shy && !tab.bench
         }
-        tab.groupID = id
-        partner?.groupID = id
-        removeEmptyGroup(previousGroup)
+        guard !targets.isEmpty else { return }
+        var previousGroups = Set<UUID>()
+        var movedAny = false
+        for tab in targets {
+            let previousGroup = tab.groupID
+            if previousGroup != id {
+                movedAny = true
+                if let previousGroup { previousGroups.insert(previousGroup) }
+                tab.groupID = id
+                if let partner = split(for: tab).flatMap({ pair in
+                    tabs.first { $0.id == (pair.left == tab.id ? pair.right : pair.left) }
+                }) {
+                    partner.groupID = id
+                }
+            }
+        }
+        guard movedAny else { return }
+        for groupID in previousGroups where groupID != id {
+            removeEmptyGroup(groupID)
+        }
         arrangeGroupedTabs()
         if let id, let index = tabGroups.firstIndex(where: { $0.id == id }) {
             tabGroups[index].collapsed = false
@@ -4558,15 +4574,35 @@ final class Browser: NSObject, ObservableObject {
         writeSession(now: true)
     }
 
+    func move(_ tab: Tab, toGroup id: UUID?) {
+        move([tab], toGroup: id)
+    }
+
     /// Insert relative to a visible member, after removing the carried item.
     /// Assign the completed row once: tabs' normalization must not see a half move.
     func move(_ tab: Tab, toGroup target: GroupDropTarget, detaching: Bool = false) {
         guard tabs.contains(where: { $0 === tab }),
               let groupIndex = tabGroups.firstIndex(where: { $0.id == target.group }) else { return }
-        let moving = (detaching ? nil : split(for: tab)).map { pair in
-            pair.tabs.compactMap { id in tabs.first { $0.id == id } }
-        } ?? [tab]
-        guard moving.allSatisfy({ $0.pin == nil && !$0.shy && !$0.bench }) else { return }
+        let actionTabs = tabsForAction(on: tab)
+        let candidates = actionTabs.count > 1 ? actionTabs : [tab]
+        var moving: [Tab] = []
+        for candidate in candidates {
+            if detaching {
+                if candidate.pin == nil && !candidate.shy && !candidate.bench && !moving.contains(where: { $0.id == candidate.id }) {
+                    moving.append(candidate)
+                }
+            } else if let pair = split(for: candidate) {
+                for id in pair.tabs {
+                    if let partner = tabs.first(where: { $0.id == id }),
+                       partner.pin == nil && !partner.shy && !partner.bench && !moving.contains(where: { $0.id == partner.id }) {
+                        moving.append(partner)
+                    }
+                }
+            } else if candidate.pin == nil && !candidate.shy && !candidate.bench && !moving.contains(where: { $0.id == candidate.id }) {
+                moving.append(candidate)
+            }
+        }
+        guard !moving.isEmpty else { return }
         let ids = Set(moving.map(\.id))
         var anchor: Tab?
         if let member = target.member {
