@@ -42,6 +42,16 @@ struct SplitDropZone: NSViewRepresentable {
     }
 }
 
+/// The half a carried pair lets go of, once it has been shown: the pair's
+/// own item dims the half that stays (see SplitTabItem, IconPair). Apart
+/// from TabDrag, so a split shown over a page redraws no pair in the row.
+@MainActor
+final class PairSeparation: ObservableObject {
+    static let shared = PairSeparation()
+    @Published fileprivate(set) var leaving: Tab.ID?
+    private init() {}
+}
+
 /// Only the Stage observes `preview`; the browser's tab row stays still while
 /// the pointer moves across a page. A marker is weakly kept and checked in
 /// the source window before it can become a target.
@@ -68,6 +78,16 @@ final class TabDrag: ObservableObject {
 
     @Published private(set) var preview: Preview?
     @Published private(set) var cancelledID: Tab.ID?
+    /// The page a carried tab is over, anywhere on it, when that page could
+    /// be split with it: its edges are shown as the places that split it
+    /// (see SplitDropHint), before the hand has reached one or stopped.
+    /// Over the middle nothing splits, and nothing used to say where would.
+    @Published private(set) var over: Over?
+
+    struct Over: Equatable {
+        let browserID: ObjectIdentifier
+        let targetID: Tab.ID
+    }
 
     private final class WeakMarker {
         weak var view: SplitDropZone.Marker?
@@ -79,6 +99,16 @@ final class TabDrag: ObservableObject {
     private weak var gestureTab: Tab?
     private weak var sourceTab: Tab?
     private var target: Drop = .outside
+    /// The half of a pair let go of before `before` (nil: at the end), once
+    /// the hand has rested over that place: a pair comes apart only where
+    /// that was shown, as a page splits only where its split was.
+    private var separation: (leaving: Tab.ID, before: Tab.ID?)?
+    /// The tab the press that picked this one up put away (#625): a tab in
+    /// the column opens as the button goes down, so carried onto the page it
+    /// meets its own page and splits nothing. Once the hand is over that
+    /// page, the one that was there before comes back, to split with, as it
+    /// was before the press when tabs opened on letting go.
+    private var putAway: Tab.ID?
     private var escapeMonitor: Any?
 
     /// Only a page's edges split it, a band of either side about a quarter
@@ -92,7 +122,14 @@ final class TabDrag: ObservableObject {
     /// what shows the split. No fixed wait, and no flicker from a tab
     /// carried straight across.
     static let settle: CGFloat = 6
-    static let still: TimeInterval = 0.09
+    nonisolated static let still: TimeInterval = 0.09
+    /// How long a carried pair's half rests over another tab before it is
+    /// shown coming apart: longer than a split over a page, since the hand
+    /// slows to a crawl right there on its way to moving the pair a place.
+    static let parting: TimeInterval = 0.3
+    /// How long after the press that opened it a drag still counts as that
+    /// press's: a hand may hold a tab a while before it sets off.
+    static let pressed: TimeInterval = 10
 
     /// Where the pointer has been lately, for whether it has settled.
     private var trail: [(point: NSPoint, at: TimeInterval)] = []
@@ -119,6 +156,7 @@ final class TabDrag: ObservableObject {
         guard cancelledID != tab.id else { return true }
         guard sourceTab != nil else { return false }
         let point = pointer(in: browser)
+        bringBack(browser: browser, at: point)
         let now = ProcessInfo.processInfo.systemUptime
         trail.append((point, now))
         trail.removeAll { now - $0.at > 0.5 }
@@ -130,8 +168,17 @@ final class TabDrag: ObservableObject {
     @discardableResult
     private func look(browser: Browser, at point: NSPoint) -> Bool {
         guard let sourceTab else { return false }
+        let page = splittablePage(browser: browser, source: sourceTab, at: point)
+        let now = page.map { Over(browserID: ObjectIdentifier(browser), targetID: $0.id) }
+        if over != now { over = now }
         let matched = match(browser: browser, source: sourceTab, at: point)
         target = matched
+        if case .strip(let place) = matched {
+            if preview != nil { preview = nil }
+            separate(sourceTab, before: place, browser: browser, at: point)
+            return false
+        }
+        if separation != nil { showSeparation(nil) }
         guard case .stage(let page, let onLeft) = matched else {
             recheck?.cancel()
             if preview != nil { preview = nil }
@@ -156,9 +203,40 @@ final class TabDrag: ObservableObject {
         return true
     }
 
-    private func settled(at point: NSPoint) -> Bool {
+    /// A carried pair's half over another tab, or past the last: the half
+    /// that stays dims once the hand rests there, with the same tick as a
+    /// split shown over a page. Carried along without stopping, or nudged
+    /// past the pair's own edge on the way to its new place, it shows
+    /// nothing, and the pair is let go of as one (#883).
+    private func separate(_ half: Tab, before place: Tab?, browser: Browser, at point: NSPoint) {
+        if let separation, separation.leaving == half.id, separation.before == place?.id { return }
+        if separation != nil { showSeparation(nil) }
+        // Known for less than that, the hand has only just set off: a
+        // single point isn't a hand at rest.
         let now = ProcessInfo.processInfo.systemUptime
-        let recent = trail.filter { now - $0.at <= TabDrag.still }
+        let known = trail.first.map { now - $0.at >= TabDrag.parting } ?? false
+        guard known, settled(at: point, for: TabDrag.parting) else {
+            recheck?.cancel()
+            let work = DispatchWorkItem { [weak self, weak browser] in
+                guard let self, let browser, self.sourceBrowser === browser else { return }
+                self.look(browser: browser, at: self.pointer(in: browser))
+            }
+            recheck = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + TabDrag.parting + 0.02, execute: work)
+            return
+        }
+        showSeparation((half.id, place?.id))
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+    }
+
+    private func showSeparation(_ shown: (leaving: Tab.ID, before: Tab.ID?)?) {
+        separation = shown
+        if PairSeparation.shared.leaving != shown?.leaving { PairSeparation.shared.leaving = shown?.leaving }
+    }
+
+    private func settled(at point: NSPoint, for still: TimeInterval = TabDrag.still) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        let recent = trail.filter { now - $0.at <= still }
         // Nothing new for a while: at rest.
         guard let first = recent.first else { return true }
         return recent.allSatisfy { hypot($0.point.x - point.x, $0.point.y - point.y) < TabDrag.settle }
@@ -178,6 +256,11 @@ final class TabDrag: ObservableObject {
                preview != Preview(browserID: ObjectIdentifier(browser), targetID: page.id, side: onLeft ? .left : .right, sourceID: sourceTab?.id) {
                 result = .outside
             }
+            // A pair apart only where that was shown.
+            if case .strip(let place) = result,
+               separation.map({ $0.leaving == source.id && $0.before == place?.id }) != true {
+                result = .outside
+            }
         } else {
             result = .outside
         }
@@ -188,7 +271,13 @@ final class TabDrag: ObservableObject {
     /// The drag callback is delivered with a window-local NSEvent. Use that
     /// event as the source of truth: synthesized drags need not move macOS's
     /// global mouse location at the same time.
-    private func pointer(in browser: Browser) -> NSPoint {
+    /// A test's hand, in screen points: a window off every screen gets its
+    /// events from the test, and the gesture hears them once AppKit's event
+    /// is no longer current, so neither would say where the hand is.
+    static var testPointer: NSPoint?
+
+    func pointer(in browser: Browser) -> NSPoint {
+        if Store.testing, let point = TabDrag.testPointer { return point }
         if let window = browser.window, let event = NSApp.currentEvent,
            event.window === window,
            event.type == .leftMouseDragged || event.type == .leftMouseUp {
@@ -203,6 +292,16 @@ final class TabDrag: ObservableObject {
         sourceBrowser = browser
         gestureTab = tab
         sourceTab = sourceHalf(browser: browser, gesture: tab, at: origin)
+        // Opened by this very press: the tab on screen before it, if it is
+        // still open. A press long ago, or one that opened nothing, leaves
+        // the page as it is.
+        let now = ProcessInfo.processInfo.systemUptime
+        if let opened = TabPress.openedAt, now - opened < TabDrag.pressed,
+           let came = browser.cameFrom, came.at >= opened, let before = came.id,
+           browser.visibleTabIDs.contains(tab.id), !browser.visibleTabIDs.contains(before),
+           browser.tabs.contains(where: { $0.id == before }) {
+            putAway = before
+        }
         // Escape is the drag's only while the button is down. A gesture
         // taken away mid-drag never says it ended, and its monitor stayed
         // to eat the next Escape anywhere, one meant for a video's full
@@ -215,15 +314,47 @@ final class TabDrag: ObservableObject {
         }
     }
 
-    private func cancel() {
+    /// The tab a drop would take when the drag picked up `tab`: of a pair,
+    /// the half under the hand. Nil until the drag has been updated.
+    func source(of tab: Tab) -> Tab? {
+        gestureTab === tab ? sourceTab : nil
+    }
+
+    /// The gesture carrying `tab` was taken away mid-drag (see CarryGuard):
+    /// what it showed goes, and its Escape with it.
+    func callOff(_ tab: Tab) {
+        guard gestureTab === tab else { return }
+        clear()
+    }
+
+    func cancel() {
         // The monitor goes first: a drag whose tab has gone has nothing to
         // cancel, and kept, its monitor would go on asking.
         removeMonitor()
         guard let gestureTab else { return }
         cancelledID = gestureTab.id
         preview = nil
+        over = nil
+        showSeparation(nil)
         target = .cancelled
         removeMonitor()
+    }
+
+    /// The hand over the carried tab's own page (or its pair's): the page
+    /// that was on screen before the press comes back, once.
+    private func bringBack(browser: Browser, at point: NSPoint) {
+        guard let back = putAway, let source = sourceTab, let window = browser.window else { return }
+        let own = browser.split(for: source)?.tabs ?? [source.id]
+        markers = markers.filter { $0.value.view != nil }
+        let overOwn = markers.values.compactMap(\.view).contains { view in
+            view.kind == .stage && view.browser === browser && view.window === window
+                && !view.isHiddenOrHasHiddenAncestor
+                && view.tab.map { own.contains($0.id) } == true
+                && window.convertToScreen(view.convert(view.bounds, to: nil)).contains(point)
+        }
+        guard overOwn else { return }
+        putAway = nil
+        if let tab = browser.tabs.first(where: { $0.id == back }) { browser.select(tab) }
     }
 
     private func clear() {
@@ -231,9 +362,12 @@ final class TabDrag: ObservableObject {
         recheck = nil
         trail = []
         preview = nil
+        over = nil
+        showSeparation(nil)
         sourceBrowser = nil
         gestureTab = nil
         sourceTab = nil
+        putAway = nil
         target = .outside
         removeMonitor()
     }
@@ -241,6 +375,19 @@ final class TabDrag: ObservableObject {
     private func removeMonitor() {
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
         escapeMonitor = nil
+    }
+
+    /// The page under the hand, anywhere on it, that the carried tab could
+    /// be split with.
+    private func splittablePage(browser: Browser, source: Tab, at point: NSPoint) -> Tab? {
+        guard let window = browser.window else { return nil }
+        markers = markers.filter { $0.value.view != nil }
+        return markers.values.compactMap(\.view).first { view in
+            view.kind == .stage && view.browser === browser && view.window === window
+                && !view.isHiddenOrHasHiddenAncestor
+                && view.tab.map { browser.canSplit(source, with: $0) } == true
+                && window.convertToScreen(view.convert(view.bounds, to: nil)).contains(point)
+        }?.tab
     }
 
     private func match(browser: Browser, source: Tab, at point: NSPoint) -> Drop {

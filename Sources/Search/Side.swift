@@ -1,5 +1,14 @@
 import SwiftUI
 
+/// The column's and the side panel's widths while an edge of theirs is held,
+/// for the page beside them: it follows the pointer from here, and the
+/// settings are written once, when the edge is let go. Each window has its
+/// own, so only the window being pulled moves until then.
+final class HeldEdges: ObservableObject {
+    @Published var side: CGFloat?
+    @Published var panel: CGFloat?
+}
+
 /// The tabs, down either side instead of across the top.
 ///
 /// The same pieces as the strip — the grey that slides to the tab you picked,
@@ -20,6 +29,13 @@ struct SideBar: View {
     @State private var landing = false
     /// The width the column had when the edge was picked up.
     @State private var grabbed: CGFloat?
+    /// The width while the edge is held. The setting is written once, when
+    /// it is let go: written on every step, each one was a write to the
+    /// settings and a change heard by every window and all that is in it.
+    @State private var live: CGFloat?
+    /// The width while the edge is held, nil once it is let go, for the page
+    /// beside the column to follow (see HeldEdges).
+    var onDrag: (CGFloat?) -> Void = { _ in }
     @State private var onEdge = false
 
     /// A pin, picked up out of the grid — a separate state from the loose
@@ -30,6 +46,7 @@ struct SideBar: View {
     @Namespace private var after
 
     @State private var groupFrames: [UUID: GroupDropFrame] = [:]
+    @State private var looseFrames = LooseFrames()
 
     /// A tab carried over the pins, or a pin over the tabs, and where it
     /// would land (see PinDrop).
@@ -50,6 +67,8 @@ struct SideBar: View {
 
     /// A tab's line: taller with roomier tabs turned on.
     private var rowHeight: CGFloat { prefs.sideRow }
+    /// The column's width: the setting, or where the edge is while it is held.
+    private var width: CGFloat { live ?? prefs.columnWidth }
     private static let gap: CGFloat = 2
     private static let square: CGFloat = 34
     private static let pinGap: CGFloat = 4
@@ -69,7 +88,7 @@ struct SideBar: View {
     /// The window's buttons' corner: gone in full screen, where macOS takes
     /// them away, and back, forward and reload move up to the edge (idea 184).
     private var lights: CGFloat {
-        browser.fullScreen ? 0 : max(0, min(Metrics.sideLights, prefs.sideWidth - 20 - Metrics.helmDoors))
+        browser.fullScreen ? 0 : max(0, min(Metrics.sideLights, width - 20 - Metrics.helmDoors))
     }
 
     var body: some View {
@@ -126,17 +145,41 @@ struct SideBar: View {
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 10)
-            // Clear of the foot, which sits over the column's bottom edge.
-            .padding(.bottom, footHeight)
+            // Clear of the foot, which sits over the sidebar's bottom edge,
+            // and of what plays in another tab, over the foot.
+            .padding(.bottom, footHeight + (browser.player == nil ? 0 : rowHeight + SideBar.playerGap))
 
-            VStack {
+            VStack(spacing: 0) {
                 Spacer()
+                if let tab = browser.player {
+                    PlayerRow(browser: browser, prefs: prefs, tab: tab)
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, SideBar.playerGap)
+                        .transition(.opacity)
+                }
                 foot
             }
         }
         .environment(\.greys, greys)
-        .frame(width: prefs.columnWidth)
+        .frame(width: width)
         .frame(maxHeight: .infinity)
+        // ⌘S to icons only while the edge is held takes the edge away, and
+        // its gesture ends without onEnded: let go of the held width too.
+        .onChange(of: icons) { _, now in
+            guard now, live != nil else { return }
+            live = nil
+            grabbed = nil
+            onDrag(nil)
+        }
+        // Gone while the edge is held (hidden, or the pane changed), the
+        // gesture never ends: let go of the held width, or the page stays
+        // laid out at it until the next pull.
+        .onDisappear {
+            guard live != nil else { return }
+            live = nil
+            grabbed = nil
+            onDrag(nil)
+        }
         // Rows on their way to or from another space stay in the column.
         .clipped()
         .onAppear { SpaceSwipe.shared.start(for: browser) }
@@ -157,6 +200,7 @@ struct SideBar: View {
             browser.take(providers)
         }
         .animation(Motion.quick, value: landing)
+        .animation(Motion.quick, value: browser.player?.id)
         .animation(Motion.glide, value: browser.activeID)
         .animation(Motion.glide, value: browser.editingTab)
         .animation(Motion.settle, value: browser.tabs.map(\.id))
@@ -185,12 +229,18 @@ struct SideBar: View {
             .gesture(
                 DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { value in
-                        if grabbed == nil { grabbed = prefs.sideWidth }
+                        if grabbed == nil { grabbed = prefs.columnWidth }
                         let delta = onRight ? -value.translation.width : value.translation.width
-                        let wanted = (grabbed ?? prefs.sideWidth) + delta
-                        prefs.sideWidth = min(Metrics.sideMax, max(Metrics.sideMin, wanted))
+                        let wanted = (grabbed ?? prefs.columnWidth) + delta
+                        live = min(Metrics.sideMax, max(Metrics.sideMin, wanted))
+                        onDrag(live)
                     }
-                    .onEnded { _ in grabbed = nil }
+                    .onEnded { _ in
+                        if let live { prefs.sideWidth = live }
+                        live = nil
+                        grabbed = nil
+                        onDrag(nil)
+                    }
             )
             .modifier(OneClick(double: true) {
                 withAnimation(Motion.settle) { prefs.sideWidth = Metrics.side }
@@ -207,26 +257,32 @@ struct SideBar: View {
     }
 
     private var pages: some View {
-        let width = prefs.columnWidth
-        let swipe = browser.spaceSwipe
+        let width = self.width
+        let swipe = browser.spaceSwipeSide
+        let offset = browser.spaceSwipeOffset
         let at = spaceAt
         return ZStack(alignment: .topLeading) {
             page(at, pill: pill)
-                .offset(x: swipe)
+                .modifier(SwipeShift(offset: offset, across: true))
             // Only while the fingers are bringing one in: the one they are
             // bringing, a page's width away.
             if swipe > 0, at > 0 {
                 page(at - 1, pill: before)
-                    .offset(x: swipe - width)
+                    .modifier(SwipeShift(offset: offset, by: -width, across: true))
             }
-            if swipe < 0, at < browser.spaces.count {
+            if swipe < 0, browser.drawsPage(after: at) {
                 page(at + 1, pill: after)
-                    .offset(x: swipe + width)
+                    .modifier(SwipeShift(offset: offset, by: width, across: true))
             }
         }
         // The pages are the column's whole width, each with its own margin.
         .padding(.horizontal, -10)
-        .frame(maxHeight: .infinity, alignment: .top)
+        // The room there is, and never more: another space's rows, drawn
+        // whole while they pass, run on past the foot rather than making the
+        // column taller than the window. With no minimum, a long space coming
+        // in made it so, and the column, centred, lost its top and its foot
+        // until the swipe was done (#1024).
+        .frame(minHeight: 0, maxHeight: .infinity, alignment: .top)
     }
 
     /// One space's page: the rows on screen, another space's rows as they
@@ -273,21 +329,15 @@ struct SideBar: View {
                             }
                         } else {
                             ScrollViewReader { proxy in
-                                // The scroll view reaches into the margin on
-                                // the right and the rows keep it inside, so the
-                                // system's bar lands in the margin beside them
-                                // rather than over the cross on the tab under the
-                                // pointer. The column's edge lies over that margin
-                                // and answers first, so the bar never fights the
-                                // resize; the wheel and the trackpad still scroll.
-                                ScrollView(.vertical) {
-                                    rows.padding(.trailing, 10)
-                                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
-                                            room.drawn = $0
-                                            refit()
-                                        }
+                                // Without scroll indicators: the tab column stays quiet
+                                // and distraction-free, matching other vertical-tab browsers.
+                                // The wheel and the trackpad still scroll smoothly.
+                                ScrollView(.vertical, showsIndicators: false) {
+                                    rows.onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                                        room.drawn = $0
+                                        refit()
+                                    }
                                 }
-                                .padding(.trailing, -10)
                                 // The tab you go to is the tab you see — ⌘1–⌘9,
                                 // ⇧⌘], a link opening beside the one on screen.
                                 .onChange(of: browser.activeID) { _, id in
@@ -347,7 +397,7 @@ struct SideBar: View {
             }
         }
         .padding(.horizontal, 10)
-        .frame(width: prefs.columnWidth, alignment: .topLeading)
+        .frame(width: width, alignment: .topLeading)
     }
 
     private func refit() {
@@ -478,6 +528,13 @@ struct SideBar: View {
         }
     }
 
+    /// Each row's place down the column, the gap under it included: a pair
+    /// stands as two lines (see Carried). Worked out once for the list.
+    private func steps(_ rows: [Tab]) -> [CGFloat] {
+        let pairs = prefs.splitView ? Set(browser.splits.filter { $0.left != $0.right }.map(\.left)) : []
+        return rows.map { (pairs.contains($0.id) ? rowHeight * 2 : rowHeight) + SideBar.gap }
+    }
+
     // MARK: - the pinned squares
 
     private var pinnedTabs: [Tab] { browser.squarePins }
@@ -521,7 +578,7 @@ struct SideBar: View {
     /// cell allows, never taller than the classic square: past that a cell
     /// turns into a wide, short button rather than a bigger icon.
     private func pinCells(_ count: Int) -> [CGRect] {
-        let room = prefs.columnWidth - 20
+        let room = width - 20
         let gap = SideBar.pinGap
         let fits = Int((room + gap) / (SideBar.square + gap))
         let rows = SideBar.pinRows(count, most: min(4, max(1, fits)))
@@ -588,6 +645,7 @@ struct SideBar: View {
         let pins = browser.listedPins
         let squares = browser.squarePins.count
         let ghost: Int? = if case .listed(let at)? = crossing?.target { at } else { nil }
+        let pinSteps = steps(pins)
         return VStack(spacing: SideBar.gap) {
             ForEach(Array(pins.enumerated()), id: \.element.id) { index, tab in
                 if ghost == index, let carried = crossingTab {
@@ -604,8 +662,7 @@ struct SideBar: View {
                                 close: { browser.close(tab) })
                     }
                 }
-                    .modifier(Carried(index: index, count: pins.count,
-                                      step: rowHeight + SideBar.gap, vertical: true,
+                    .modifier(Carried(index: index, steps: pinSteps, vertical: true,
                                       space: "listed",
                                       cross: { cross(tab, $0, from: .listed) },
                                       land: { land(tab, $0) }, faded: crossing?.tab == tab.id) {
@@ -643,9 +700,9 @@ struct SideBar: View {
             // In a stack of their own, measured, for where a pin carried
             // among them would land.
             if !loose.isEmpty || ghost != nil {
+                let looseSteps = steps(loose)
                 VStack(spacing: SideBar.gap) {
                     ForEach(Array(loose.enumerated()), id: \.element.id) { index, tab in
-                        let step = rowHeight + SideBar.gap
                         if ghost == index, let carried = crossingTab {
                             RowGhost(tab: carried, height: rowHeight, size: prefs.sideTitle)
                         }
@@ -654,9 +711,10 @@ struct SideBar: View {
                                 close: { browser.closeTab(tab) })
                         // Positions here are among the loose rows; the pinned block
                         // sits in front of them in the real list.
-                        .modifier(Carried(index: index, count: loose.count, step: step, vertical: true,
+                        .modifier(Carried(index: index, steps: looseSteps, vertical: true,
                                           space: "rows", onDropTab: { source, point in drop(source, at: point) },
                                           groupDestination: { source, point in destination(source, at: point) },
+                                          loose: prefs.usesTabGroups ? looseFrames : nil,
                                           outside: { browser.dragOut(tab) }, browser: browser, tab: tab,
                                           cross: { cross(tab, $0, from: .rows) },
                                           land: { land(tab, $0) }, faded: crossing?.tab == tab.id) {
@@ -688,19 +746,30 @@ struct SideBar: View {
     }
 
     private func drop(_ tab: Tab, at point: CGPoint) {
-        if let target = destination(tab, at: point) { browser.move(tab, toGroup: target) }
+        if let target = destination(tab, at: point) {
+            browser.move(tab, toGroup: target)
+        } else if let out = leaving(tab, at: point) {
+            browser.move(tab, outOfGroupBefore: out.before)
+        }
+    }
+
+    private func leaving(_ tab: Tab, at point: CGPoint) -> LooseDrop? {
+        guard prefs.usesTabGroups, tab.pin == nil else { return nil }
+        let loose = Set(looseTabs.map(\.id))
+        return GroupDropFrames.leaving(point, frames: groupFrames, loose: looseFrames.rects.filter { loose.contains($0.key) },
+                                       groups: browser.tabGroups, source: tab.id, vertical: true)
     }
 
     private func groupRows(_ group: TabGroup) -> some View {
         let members = browser.visibleTabs(in: group)
+        let memberSteps = steps(members)
         return VStack(spacing: SideBar.gap) {
             ForEach(Array(members.enumerated()), id: \.element.id) { index, tab in
                 rowItem(tab, tabs: browser.tabs, splits: browser.splits,
                         activeID: browser.activeID, interactive: true, pill: pill,
                         close: { browser.closeTab(tab) })
                     .padding(.leading, icons ? 0 : 14)
-                    .modifier(Carried(index: index, count: members.count,
-                                      step: rowHeight + SideBar.gap, vertical: true,
+                    .modifier(Carried(index: index, steps: memberSteps, vertical: true,
                                       space: "rows", onDropTab: { source, point in drop(source, at: point) },
                                       groupDestination: { source, point in destination(source, at: point) },
                                       outside: { browser.dragOut(tab) }, browser: browser, tab: tab,
@@ -762,7 +831,7 @@ struct SideBar: View {
         let gridShown = !squares.isEmpty || ghostSquare != nil
         let rowsOn = prefs.showsPinRows
         let listedShown = rowsOn && (!browser.listedPins.isEmpty || isListedGhost)
-        let zone = PinDrop.zone(point, width: prefs.columnWidth - 20,
+        let zone = PinDrop.zone(point, width: width - 20,
                                 gridBottom: gridShown ? frames.grid?.maxY : nil,
                                 listed: listedShown ? frames.listed : nil)
         switch zone {
@@ -849,8 +918,10 @@ struct SideBar: View {
     /// The foot's door and its margin beneath; with icons only, its doors
     /// one above the other.
     private var footHeight: CGFloat {
-        icons ? CGFloat(SideFoot.doors(prefs, browser.fetches)) * 28 + 8 : 26 + 10
+        icons ? CGFloat(SideFoot.doors(prefs, browser.fetches, hanging: browser.downloadsHanging)) * 28 + 8 : 26 + 10
     }
+    /// Between what plays in another tab and the foot's doors.
+    private static let playerGap: CGFloat = 4
 
     @ViewBuilder
     private var newTab: some View {
@@ -866,7 +937,7 @@ struct SideBar: View {
 
     /// One small door at the bottom: the settings.
     private var foot: some View {
-        SideFoot(browser: browser, prefs: prefs, fetches: browser.fetches, vertical: icons)
+        SideFoot(browser: browser, prefs: prefs, fetches: browser.fetches, vertical: icons, width: width)
     }
 
 }
@@ -883,13 +954,15 @@ private struct SideFoot: View {
     /// The column of icons: one above the other, centred, no pinned
     /// extensions (their list is still the puzzle's).
     var vertical = false
+    /// The column's width, as it is drawn.
+    let width: CGFloat
 
     var body: some View {
         if vertical {
             VStack(spacing: 2) {
                 PaletteDoor(browser: browser)
-                FetchDoor(browser: browser, fetches: fetches)
-                ExtensionSlot(edge: prefs.sidePosition == .right ? .leading : .trailing, room: 0)
+                FetchDoor(browser: browser, fetches: fetches, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing)
+                ExtensionSlot(browser: browser, edge: prefs.sidePosition == .right ? .leading : .trailing, room: 0)
                 BookmarkDoor(browser: browser, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing)
                 if prefs.usesSpaces { SpaceDot(browser: browser) }
                 if Profiles.shared.several { ProfileBadge(browser: browser) }
@@ -901,10 +974,10 @@ private struct SideFoot: View {
                 if Profiles.shared.several { ProfileBadge(browser: browser) }
                 if prefs.usesSpaces { SpaceDot(browser: browser) }
                 if prefs.usesSpaces { SpaceDots(browser: browser) }
-                ExtensionSlot(edge: .trailing, room: room)
+                ExtensionSlot(browser: browser, edge: .trailing, room: room)
                 BookmarkDoor(browser: browser, arrowEdge: .trailing)
                 // Only while a download is running, and a moment after.
-                FetchDoor(browser: browser, fetches: fetches)
+                FetchDoor(browser: browser, fetches: fetches, arrowEdge: prefs.sidePosition == .right ? .leading : .trailing)
                 Spacer(minLength: 0)
                 PaletteDoor(browser: browser)
             }
@@ -914,11 +987,11 @@ private struct SideFoot: View {
     }
 
     /// How many doors the foot has, stacked: what the rows stop short of.
-    @MainActor static func doors(_ prefs: Preferences, _ fetches: Fetches) -> Int {
-        var kept = 3  // the puzzle, bookmarks and search
+    @MainActor static func doors(_ prefs: Preferences, _ fetches: Fetches, hanging: Bool = false) -> Int {
+        var kept = 3  // the puzzle, bookmarks and the palette
         if prefs.usesSpaces { kept += 1 }
         if Profiles.shared.several { kept += 1 }
-        if FetchDoor.shows(fetches, prefs) { kept += 1 }
+        if FetchDoor.shows(fetches, prefs, hanging: hanging) { kept += 1 }
         return kept
     }
 
@@ -929,9 +1002,9 @@ private struct SideFoot: View {
         var kept = 3  // the puzzle, bookmarks and search
         if prefs.usesSpaces { kept += 1 }
         if Profiles.shared.several { kept += 1 }
-        if FetchDoor.shows(fetches, prefs) { kept += 1 }
+        if FetchDoor.shows(fetches, prefs, hanging: browser.downloadsHanging) { kept += 1 }
         let dots = prefs.usesSpaces ? SpaceDots.width(browser.spaces.count) : 0
-        let free = prefs.sideWidth - 2 * 10 + 2 - CGFloat(kept) * door - dots
+        let free = width - 2 * 10 + 2 - CGFloat(kept) * door - dots
         return max(0, Int((free / door).rounded(.down)))
     }
 }
@@ -963,16 +1036,45 @@ private struct PinGrid: Layout {
 /// A pinned tab as a cell in the block at the top of the column — as wide as
 /// its row asks for, but never taller than the classic square, so a row with
 /// room to spare turns into a wide, short button rather than a bigger icon.
-private struct PinSquare: View {
+private struct PinSquare: View, Equatable {
     @Environment(\.greys) private var greys
     @Environment(\.tabShortcutNumbers) private var shortcutNumbers
-    @ObservedObject var browser: Browser
+    let browser: Browser
     @ObservedObject var prefs: Preferences
     @ObservedObject var tab: Tab
     let live: Bool
     let pill: Namespace.ID
     var width: CGFloat = 34
     var height: CGFloat = 34
+    /// Its letter being changed.
+    private let lettering: Bool
+    private let selected: Bool
+    /// Picked with ⌘ or ⇧ along with others: its press leaves the pick be.
+    private let pickedAmongOthers: Bool
+    /// The peek opened from it, while it is up.
+    private let peek: Tab?
+
+    init(browser: Browser, prefs: Preferences, tab: Tab, live: Bool, pill: Namespace.ID,
+         width: CGFloat = 34, height: CGFloat = 34) {
+        self.browser = browser
+        self.prefs = prefs
+        self.tab = tab
+        self.live = live
+        self.pill = pill
+        self.width = width
+        self.height = height
+        lettering = browser.editingPin == tab.id
+        selected = browser.selectedTabIDs.contains(tab.id)
+        pickedAmongOthers = browser.isPickedAmongOthers(tab)
+        peek = browser.peekFrom == tab.id ? browser.peekTab : nil
+    }
+
+    static func == (a: PinSquare, b: PinSquare) -> Bool {
+        a.browser === b.browser && a.prefs === b.prefs && a.tab === b.tab && a.live == b.live
+            && a.pill == b.pill && a.width == b.width && a.height == b.height
+            && a.lettering == b.lettering && a.selected == b.selected
+            && a.pickedAmongOthers == b.pickedAmongOthers && a.peek === b.peek
+    }
 
     @State private var hovering = false
     @State private var selectedOnPress = false
@@ -984,7 +1086,7 @@ private struct PinSquare: View {
 
     var body: some View {
         Group {
-            if browser.editingPin == tab.id {
+            if lettering {
                 PinField(browser: browser, tab: tab)
             } else if let number = shortcutNumbers[tab.id] {
                 TabShortcutNumber(number: number)
@@ -1012,14 +1114,14 @@ private struct PinSquare: View {
                         .matchedGeometryEffect(id: "live", in: pill)
                 } else {
                     RoundedRectangle(cornerRadius: scale * 9 / 34, style: .continuous)
-                        .fill(browser.selectedTabIDs.contains(tab.id) ? greys.wash :
+                        .fill(selected ? greys.wash :
                               hovering ? greys.hover : greys.tile)
                 }
             }
             .animation(Motion.quick, value: live)
         }
         .overlay {
-            if browser.selectedTabIDs.contains(tab.id) {
+            if selected {
                 RoundedRectangle(cornerRadius: scale * 9 / 34, style: .continuous)
                     .strokeBorder(Palette.ink.opacity(0.35), lineWidth: 1)
                     .allowsHitTesting(false)
@@ -1027,51 +1129,93 @@ private struct PinSquare: View {
         }
         .overlay(alignment: .topTrailing) {
             // The peek opened from it, while it is up.
-            if browser.peekFrom == tab.id, let page = browser.peekTab {
+            if let page = peek {
                 PeekBadge(page: page, size: scale * 16 / 34)
                     .offset(x: scale * 4 / 34, y: -scale * 4 / 34)
             }
         }
-        .animation(Motion.quick, value: browser.peekFrom)
+        .animation(Motion.quick, value: peek?.id)
         .contentShape(RoundedRectangle(cornerRadius: scale * 9 / 34, style: .continuous))
-        .modifier(TabPress(enabled: browser.editingPin != tab.id, active: live, selected: $selectedOnPress) {
+        .modifier(TabPress(enabled: !lettering && !pickedAmongOthers, active: live, selected: $selectedOnPress) {
             browser.clearTabSelection()
             browser.select(tab)
         })
         .modifier(OneClick(double: live) {
-            guard !selectedOnPress, NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty else { return }
+            guard !selectedOnPress, TabClick.flags.intersection([.command, .shift, .option]).isEmpty else { return }
             browser.clearTabSelection()
             if live { browser.goHome(tab) } else { browser.select(tab) }
         })
         .modifier(ModifiedTabClick { browser.extendTabSelection(to: tab, modifiers: $0) })
+        .modifier(OptionClick { if !lettering { browser.optionClick(tab) } })
         // Put down, like ⌘W: close() is what knows a pin isn't removed.
         .overlay { MiddleClick { browser.close(tab) } }
         .onHover { hovering = $0 }
         .contextMenu { TabMenu(browser: browser, tab: tab, close: { browser.close(tab) }) }
         .help(tab.label)
-        .animation(Motion.quick, value: hovering)
+        .animation(nil, value: hovering)
         .transition(.scale(scale: 0.8).combined(with: .opacity))
     }
 }
 
 /// One tab, as a line in the column.
-private struct SideRow: View {
+///
+/// It doesn't watch the Browser. The little of it a row shows is read as the
+/// column makes the row, and a row is drawn again only when that, its tab or
+/// the settings change (==): watching the whole Browser, every row was drawn
+/// again for anything that changed in the window. The Browser is kept for
+/// what a click on the row does.
+private struct SideRow: View, Equatable {
     @Environment(\.greys) private var greys
     @Environment(\.tabShortcutNumbers) private var shortcutNumbers
-    @ObservedObject var browser: Browser
+    let browser: Browser
     @ObservedObject var prefs: Preferences
     @ObservedObject var tab: Tab
     let live: Bool
     let pill: Namespace.ID
     let close: () -> Void
     var interactive = true
+    /// Its address being typed in the row.
+    private let editing: Bool
+    /// Picked with ⌘ or ⇧.
+    private let selected: Bool
+    /// Picked along with others: its press leaves the pick be.
+    private let pickedAmongOthers: Bool
+    /// The peek opened from it, while it is up.
+    private let peek: Tab?
+    /// Bumped when what was typed in a tab can't be gone to (see Shake).
+    private let refusals: Int
+    /// Its cross is a minus: closing it puts its page away (Browser.putsAway).
+    private let putsAway: Bool
+
+    init(browser: Browser, prefs: Preferences, tab: Tab, live: Bool, pill: Namespace.ID,
+         close: @escaping () -> Void, interactive: Bool = true) {
+        self.browser = browser
+        self.prefs = prefs
+        self.tab = tab
+        self.live = live
+        self.pill = pill
+        self.close = close
+        self.interactive = interactive
+        editing = browser.editingTab == tab.id
+        selected = browser.selectedTabIDs.contains(tab.id)
+        pickedAmongOthers = browser.isPickedAmongOthers(tab)
+        peek = browser.peekFrom == tab.id ? browser.peekTab : nil
+        refusals = browser.refusals
+        putsAway = browser.putsAway(tab)
+    }
+
+    /// The close action is left out: it closes the same tab every time.
+    static func == (a: SideRow, b: SideRow) -> Bool {
+        a.browser === b.browser && a.prefs === b.prefs && a.tab === b.tab && a.live == b.live
+            && a.pill == b.pill && a.interactive == b.interactive && a.editing == b.editing
+            && a.selected == b.selected && a.pickedAmongOthers == b.pickedAmongOthers
+            && a.peek === b.peek && a.refusals == b.refusals && a.putsAway == b.putsAway
+    }
 
     @State private var hovering = false
     @State private var selectedOnPress = false
     @State private var shake: CGFloat = 0
     @State private var pressed = false
-
-    private var editing: Bool { browser.editingTab == tab.id }
 
     /// The ring or the speaker, which stay for as long as the page loads or
     /// plays (or is muted) and so keep a place of their own at the end of the
@@ -1082,7 +1226,7 @@ private struct SideRow: View {
     private var speaker: Bool { !tab.loading && (tab.noisy || tab.muted) }
     /// A pinned row with a peek opened from it: the peek's icon at its end,
     /// as on a square's corner.
-    private var peeking: Bool { !editing && tab.pin != nil && browser.peekFrom == tab.id && browser.peekTab != nil }
+    private var peeking: Bool { !editing && tab.pin != nil && peek != nil }
     /// Where the page is, said on the row you're on (Settings › Tabs › Show
     /// the address on the tab you're on).
     private var rest: AtRest? { live && !editing ? AtRest.said(tab.restAddress, always: prefs.showsAddress) : nil }
@@ -1096,8 +1240,10 @@ private struct SideRow: View {
                     TabAddressField(browser: browser)
                         .frame(height: 16)
                 } else {
-                    if prefs.glyph == .icons, !tab.isBlank {
-                        Mark(icon: tab.icon, letter: tab.monogram, size: prefs.roomyTabs ? 17 : 15)
+                    // The site's icon, or with Letters its letter: beside the
+                    // title either way, as Settings says (#919).
+                    if !tab.isBlank {
+                        Mark(icon: prefs.glyph == .icons ? tab.icon : nil, letter: tab.monogram, size: prefs.roomyTabs ? 17 : 15)
                     }
                     if tab.bench {
                         // A script's tab, not yours.
@@ -1130,12 +1276,12 @@ private struct SideRow: View {
             .padding(.trailing, status || peeking ? 0 : 10)
             .frame(height: prefs.sideRow)
             .contentShape(Rectangle())
-            .modifier(TabPress(enabled: interactive && !editing && !(browser.selectedTabIDs.contains(tab.id) && browser.selectedTabs.count > 1), active: live, selected: $selectedOnPress, pressing: $pressed) {
+            .modifier(TabPress(enabled: interactive && !editing && !pickedAmongOthers, active: live, selected: $selectedOnPress, pressing: $pressed) {
                 browser.clearTabSelection()
                 browser.select(tab)
             })
 
-            if peeking, let page = browser.peekTab {
+            if peeking, let page = peek {
                 // Under the pointer the cross takes its place, unless the
                 // ring or the speaker already holds the end of the row.
                 PeekBadge(page: page, size: 16)
@@ -1186,7 +1332,7 @@ private struct SideRow: View {
                         // A pinned row is put down, not closed (see
                         // Browser.close), and says so, as Arc's does; so is
                         // a grouped tab's page while it is open (closeTab).
-                        Image(systemName: tab.pin != nil || browser.putsAway(tab) ? "minus" : "xmark")
+                        Image(systemName: tab.pin != nil || putsAway ? "minus" : "xmark")
                             .font(.system(size: 8, weight: .semibold))
                             .foregroundStyle(Palette.muted)
                             .frame(width: 15, height: 15)
@@ -1211,7 +1357,7 @@ private struct SideRow: View {
         .animation(Motion.quick, value: peeking)
         .background { ground.animation(Motion.quick, value: live) }
         .overlay {
-            if browser.selectedTabIDs.contains(tab.id) {
+            if selected {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .strokeBorder(Palette.ink.opacity(0.35), lineWidth: 1)
                     .allowsHitTesting(false)
@@ -1221,11 +1367,12 @@ private struct SideRow: View {
         .modifier(Give(pressed: pressed && prefs.tabsGive))
         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .modifier(OneClick(double: false) {
-            guard interactive, !selectedOnPress, NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty else { return }
+            guard interactive, !selectedOnPress, TabClick.flags.intersection([.command, .shift, .option]).isEmpty else { return }
             browser.clearTabSelection()
             if live { browser.beginTabEdit(tab) } else { browser.select(tab) }
         })
         .modifier(ModifiedTabClick { if interactive && !editing { browser.extendTabSelection(to: tab, modifiers: $0) } })
+        .modifier(OptionClick { if interactive && !editing { browser.optionClick(tab) } })
         .overlay { if interactive { MiddleClick(act: close) } }
         .onHover(perform: hover)
         .onAppear { if interactive { Bench.rowAppeared(tab.id, hover: hover) } }
@@ -1236,9 +1383,9 @@ private struct SideRow: View {
                 SplitDropZone(browser: browser, tab: tab, kind: .strip)
             }
         }
-        .animation(Motion.quick, value: hovering)
+        .animation(nil, value: hovering)
         .animation(Motion.glide, value: editing)
-        .onChange(of: browser.refusals) { _, _ in
+        .onChange(of: refusals) { _, _ in
             guard editing else { return }
             shake = 0
             withAnimation(.easeOut(duration: 0.5)) { shake = 1 }
@@ -1261,7 +1408,7 @@ private struct SideRow: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .matchedGeometryEffect(id: "live", in: pill)
-        } else if browser.selectedTabIDs.contains(tab.id) {
+        } else if selected {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .fill(greys.wash)
         } else if hovering {
@@ -1483,10 +1630,22 @@ struct PinCarried: ViewModifier {
     @State private var held = false
     @State private var from = 0
     @State private var travel: CGSize = .zero
+    /// Put back by SwiftUI when the drag is called off as well as when it
+    /// ends: the square's look changing under the hand calls it off, and the
+    /// square stayed floating (see CarryGuard).
+    @GestureState private var carrying = false
+    @State private var ticket = UUID()
 
     func body(content: Content) -> some View {
         content
-            .offset(held ? PinCarried.offset(travel: travel, from: from, index: index, cells: cells) : .zero)
+            // Read where the square is drawn this frame, partway through the
+            // spring to its new cell, and only for the square in hand.
+            .visualEffect { [held, travel, from, cells] content, proxy in
+                guard held else { return content.offset(.zero) }
+                let frame = proxy.frame(in: .named("pins"))
+                return content.offset(PinCarried.offset(travel: travel, from: from, cells: cells,
+                                                        now: CGPoint(x: frame.midX, y: frame.midY)))
+            }
             // Under the hand exactly, as a row is (see Carried).
             .transaction { if held { $0.animation = nil } }
             .zIndex(held ? 1 : 0)
@@ -1496,10 +1655,12 @@ struct PinCarried: ViewModifier {
             // the drag from where it now is, and shuttle between two cells.
             .gesture(
                 DragGesture(minimumDistance: 5, coordinateSpace: .named("pins"))
+                    .updating($carrying) { _, carrying, _ in carrying = true }
                     .onChanged { value in
                         if !held {
                             held = true
                             from = index
+                            CarryGuard.open(ticket, end: callOff)
                         }
                         travel = value.translation
                         if cross?(value.location) == true { return }
@@ -1509,6 +1670,7 @@ struct PinCarried: ViewModifier {
                         }
                     }
                     .onEnded { value in
+                        guard CarryGuard.close(ticket) else { return }
                         _ = land?(value.location)
                         withAnimation(Motion.settle) {
                             held = false
@@ -1516,16 +1678,30 @@ struct PinCarried: ViewModifier {
                         }
                     }
             )
+            .onChange(of: carrying) { _, now in if !now { callOff() } }
+    }
+
+    /// Called off rather than let go: it stays in the cell it was last
+    /// moved to, and nothing is dropped across.
+    private func callOff() {
+        CarryGuard.close(ticket)
+        guard held else { return }
+        _ = land?(nil)
+        withAnimation(Motion.settle) {
+            held = false
+            travel = .zero
+        }
     }
 
     /// The held square stays glued to the fingers; every other square is
     /// already where it belongs, because the move put it there. This only
     /// takes off what the held square got for free by changing cell under
-    /// its own drag.
-    static func offset(travel: CGSize, from: Int, index: Int, cells: [CGRect]) -> CGSize {
-        guard cells.indices.contains(from), cells.indices.contains(index) else { return .zero }
-        let start = cells[from], now = cells[index]
-        return CGSize(width: travel.width - (now.midX - start.midX), height: travel.height - (now.midY - start.midY))
+    /// its own drag: as far as its centre is drawn `now`, which the spring
+    /// to the new cell hasn't finished carrying yet.
+    nonisolated static func offset(travel: CGSize, from: Int, cells: [CGRect], now: CGPoint) -> CGSize {
+        guard cells.indices.contains(from) else { return .zero }
+        let start = cells[from]
+        return CGSize(width: travel.width - (now.x - start.midX), height: travel.height - (now.y - start.midY))
     }
 
     /// The cell the held square is over: the one whose centre is nearest to

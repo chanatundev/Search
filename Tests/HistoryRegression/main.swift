@@ -356,6 +356,108 @@ private func testOneLetterCompletesOnlyTheTopVisitedSite() {
     Checks.expect(history.completion(for: "x.", among: options) == "com", "two letters still complete as before")
 }
 
+@MainActor
+private func testTitlesPathsAndSlipsFillWhatTheAddressLeaves() {
+    Store.use("loose")
+    let history = History()
+    history.record(url("https://news.example-test.org/"), title: "Hacker Daily")
+    history.record(url("https://docs.example-test.org/guide/concurrency"), title: "Swift Guide")
+    for _ in 0..<3 { history.record(url("https://hackerspace.example/"), title: "Space") }
+
+    let byTitle = history.suggestions(for: "daily", limit: 5)
+    Checks.expect(byTitle.contains { $0.url.host() == "news.example-test.org" }, "a word of the title should find its page, got \(byTitle.map(\.key))")
+    let byPath = history.suggestions(for: "concurrency", limit: 5)
+    Checks.expect(byPath.contains { $0.url.path() == "/guide/concurrency" }, "a word of the path should find its page, got \(byPath.map(\.key))")
+    let bySlip = history.suggestions(for: "concurency", limit: 5)
+    Checks.expect(bySlip.contains { $0.url.path() == "/guide/concurrency" }, "a word with a slip should still find it, got \(bySlip.map(\.key))")
+    let words = history.suggestions(for: "guide swift", limit: 5)
+    Checks.expect(words.contains { $0.url.path() == "/guide/concurrency" }, "every word, in any order, got \(words.map(\.key))")
+    Checks.expect(history.suggestions(for: "guide kotlin", limit: 5).allSatisfy { $0.url.path() != "/guide/concurrency" }, "a word found nowhere finds nothing")
+
+    // The address as typed always comes first, whatever the title says.
+    let hacker = history.suggestions(for: "hacker", limit: 5)
+    Checks.expect(hacker.first?.url.host() == "hackerspace.example", "the address as typed should lead, got \(hacker.map(\.key))")
+    Checks.expect(hacker.contains { $0.url.host() == "news.example-test.org" }, "the title's match should still be offered under it")
+    Checks.expect(history.completion(for: "daily", among: byTitle) == nil, "a title's match has no ending to finish")
+
+    Checks.expect(history.suggestions(for: "da", limit: 5).allSatisfy { !$0.title.contains("Daily") }, "two letters match no title")
+    Checks.expect(history.suggestions(for: "dai", limit: 5).contains { $0.title.contains("Daily") }, "three letters do")
+
+    // score = fit × log(2 + popularity)
+    Store.use("score-slip")
+    let slip = History()
+    slip.record(url("https://wiki.example/notes"), title: "Pipline notes")
+    for _ in 0..<40 { slip.record(url("https://git.example/team/api/-/pipelines"), title: "Pipelines") }
+    let often = slip.suggestions(for: "pipline", limit: 5).map(\.key)
+    Checks.expect(often.first == "git.example/team/api/-/pipelines", "a page used daily, with a slip, should beat one seen once, got \(often)")
+
+    Store.use("score-tie")
+    let tie = History()
+    tie.record(url("https://git.example/team/api/-/pipelines"), title: "")
+    tie.record(url("https://wiki.example/notes"), title: "Pipline")
+    let even = tie.suggestions(for: "pipline", limit: 5).map(\.key)
+    Checks.expect(even.first == "wiki.example/notes", "as often visited, the match as typed should lead, got \(even)")
+
+    Store.use("score-many")
+    let many = History()
+    for _ in 0..<50 { many.record(url("https://git.example/old/api"), title: "") }
+    for _ in 0..<500 { many.record(url("https://git.example/team/api"), title: "") }
+    let more = many.suggestions(for: "api", limit: 5).map(\.key)
+    Checks.expect(more.first == "git.example/team/api", "500 visits should lead 50, got \(more)")
+
+    // A page counts the visits to every page under it.
+    Store.use("score-under")
+    let under = History()
+    for _ in 0..<5 { under.record(url("https://git.example/team/api"), title: "team / api") }
+    for _ in 0..<40 { under.record(url("https://git.example/team/api/-/merge_requests/1"), title: "Fix api") }
+    for _ in 0..<20 { under.record(url("https://git.example/team/api/-/pipelines/2"), title: "Pipeline · api") }
+    under.record(url("https://git.example/team/api-old/-/merge_requests/9"), title: "Old api")
+    for _ in 0..<5 { under.record(url("https://rapid.example/"), title: "Rapid") }
+    let repo = under.suggestions(for: "api", limit: 3).map(\.key)
+    Checks.expect(repo.first == "git.example/team/api", "a repository should lead its merge requests, got \(repo)")
+    Checks.expect(repo.dropFirst().first == "git.example/team/api/-/merge_requests/1", "then the busiest page under it, got \(repo)")
+
+    // As often visited, the fit decides.
+    Store.use("score-fit")
+    let fits = History()
+    for page in ["https://api.example/", "https://dev-api.example/", "https://git.example/team/api", "https://rapid.example/"] {
+        fits.record(url(page), title: "")
+    }
+    let fit = fits.suggestions(for: "api", limit: 5).map(\.key)
+    Checks.expect(fit.prefix(2).map { $0.hasPrefix("api.") || $0.hasPrefix("dev-api.") } == [true, true] && fit.first?.hasPrefix("api.") == true, "the start of the address, then of a word of the name, got \(fit)")
+    Checks.expect(fit.firstIndex(of: "git.example/team/api") ?? 9 < fit.firstIndex { $0.hasPrefix("rapid") } ?? 9, "a word of the path before a word it is hidden in, got \(fit)")
+
+    // A name the app knows, typed with a slip, while nothing visited is near.
+    Store.use("loose-known")
+    let github = History().suggestions(for: "githb", limit: 5)
+    Checks.expect(github.contains { $0.key == "github.com" }, "a known site with a slip should be offered, got \(github.map(\.key))")
+}
+
+/// A title that keeps changing — an inbox counting its mail — waits for the
+/// next write instead of making one; the first title a page lands with doesn't.
+@MainActor
+private func testTitleChurnWaitsForTheNextWrite() {
+    Store.use("title-churn")
+    let file = Store.file("history.json")
+    let history = History()
+    let inbox = url("https://mail.example.test/inbox")
+    history.record(inbox, title: "")
+    _ = savedFile()
+    try? FileManager.default.removeItem(at: file)
+
+    history.retitle(inbox, "(1) Inbox")
+    Checks.expect(savedFile().contains("(1) Inbox"), "a page's first title should be written")
+    try? FileManager.default.removeItem(at: file)
+
+    history.retitle(inbox, "(2) Inbox")
+    history.retitle(inbox, "(3) Inbox")
+    Checks.expect(savedFile().isEmpty, "a title changing again should not rewrite the file")
+
+    history.flush()
+    let quit = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+    Checks.expect(quit.contains("(3) Inbox"), "quitting should write the latest title")
+}
+
 @main
 private struct HistoryRegression {
     @MainActor
@@ -369,6 +471,8 @@ private struct HistoryRegression {
         testCredentialsNeverReachTheFile()
         testLegacyCreditsMoveToTheOriginTheirPagesUsed()
         testCompletionFinishesWWWSitesWithoutTheirWWW()
+        testTitlesPathsAndSlipsFillWhatTheAddressLeaves()
+        testTitleChurnWaitsForTheNextWrite()
 
         guard Checks.failures.isEmpty else {
             fputs("\(Checks.failures.count) History regression assertion(s) failed.\n", stderr)

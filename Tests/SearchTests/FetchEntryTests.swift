@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import WebKit
 import XCTest
@@ -10,6 +11,36 @@ final class FetchEntryTests: XCTestCase {
         try await super.setUp()
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.prohibited)
+    }
+
+    func testCopyAddressOffersOnlyWhatAnotherAppCanFetch() {
+        func address(_ text: String) -> String? { Keep.address(of: URL(string: text)) }
+
+        // A signed link only works exactly as it was asked.
+        let signed = "https://cdn.example.test/a%20b.zip?x-amz-signature=a%2Fb+c&y=1#part"
+        XCTAssertEqual(address(signed), signed)
+        XCTAssertEqual(address("http://example.test/a.zip"), "http://example.test/a.zip")
+        XCTAssertEqual(address("https://me:made-up@example.test/a.zip"), "https://example.test/a.zip")
+
+        XCTAssertNil(address("blob:https://example.test/1234"))
+        XCTAssertNil(address("data:text/plain,hello"))
+        XCTAssertNil(address("file:///tmp/a.zip"))
+        XCTAssertNil(Keep.address(of: nil))
+        XCTAssertNil(FetchEntry(name: "a.zip", request: nil, webView: nil).address)
+    }
+
+    func testAListWrittenBeforeAddressesStillReads() throws {
+        let written = #"[{"name":"a.zip","from":"example.test","path":"/tmp/a.zip","date":0}]"#
+        let list = try JSONDecoder().decode([Keep].self, from: Data(written.utf8))
+        XCTAssertEqual(list.first?.name, "a.zip")
+        XCTAssertNil(list.first?.address)
+    }
+
+    func testAnAddressSurvivesTheListsFile() throws {
+        let keep = Keep(name: "a.zip", from: "example.test", path: "/tmp/a.zip", date: Date(timeIntervalSince1970: 0),
+                        address: "https://example.test/a.zip")
+        let read = try JSONDecoder().decode(Keep.self, from: JSONEncoder().encode(keep))
+        XCTAssertEqual(read, keep)
     }
 
     func testFailedResumeDataAllowsResumeWithoutOriginalRequest() async throws {
@@ -34,6 +65,28 @@ final class FetchEntryTests: XCTestCase {
         XCTAssertFalse(entry.canResume)
         XCTAssertTrue(entry.canRetry)
         XCTAssertTrue(try XCTUnwrap(entry.errorDescription).contains("doesn't let this download pause"))
+    }
+
+    func testACancelInFlightRedrawsTheRow() {
+        let entry = FetchEntry(name: "archive.zip", request: nil, webView: nil)
+        _ = entry.preparingToStop(.pause)
+        XCTAssertEqual(entry.stopping, "Pausing…")
+        var redraws = 0
+        let watching = entry.objectWillChange.sink { redraws += 1 }
+
+        // What upgradeStopToCancel does when Cancel is pressed mid-pause.
+        entry.pendingStop = .cancel
+
+        XCTAssertEqual(redraws, 1)
+        XCTAssertEqual(entry.stopping, "Cancelling…")
+        watching.cancel()
+    }
+
+    func testCancelSaysCancellingWhileItStops() {
+        let entry = FetchEntry(name: "archive.zip", request: nil, webView: nil)
+        _ = entry.preparingToStop(.cancel)
+        XCTAssertEqual(entry.state, .pausing)
+        XCTAssertEqual(entry.stopping, "Cancelling…")
     }
 
     func testBeginResumeRejectsDuplicateActionWhileWebKitStarts() async throws {

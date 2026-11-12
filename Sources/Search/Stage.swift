@@ -81,23 +81,23 @@ struct Page: View {
                     .transition(.opacity)
             }
 
-            Swiping(pull: tab.pull)
+            Swiping(pulling: tab.pulling)
         }
         .animation(Motion.quick, value: tab.page?.kind)
         .animation(Motion.quick, value: tab.failure)
         .animation(Motion.quick, value: tab.floating)
         .animation(Motion.quick, value: tab.reader)
         .animation(.easeOut(duration: 0.2), value: tab.cover == nil)
-        .animation(.easeOut(duration: 0.16), value: tab.pull == nil)
     }
 }
 
 /// What a sideways swipe puts over the page: the disc, or the list a held
 /// one opens. The page's own stage, and a small window's (Little.swift).
 struct Swiping: View {
-    let pull: Pull?
+    @ObservedObject var pulling: Pulling
 
     var body: some View {
+        let pull = pulling.pull
         ZStack {
             if let pull, pull.stops != nil {
                 // In the disc's place, grown from its own edge: it sits in a
@@ -121,6 +121,7 @@ struct Swiping: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
         }
+        .animation(.easeOut(duration: 0.16), value: pull == nil)
     }
 }
 
@@ -280,6 +281,21 @@ final class StageView: NSView {
     /// it goes out the way ⇧⌘P sends it.
     private weak var parting: NSView?
 
+    /// A page on its way back from full screen, once chosen (see `bringHome`).
+    private var homecoming: NSKeyValueObservation?
+
+    /// How a page is asked to end its full screen: as its own button does.
+    /// Its own property for the tests, which can't go full screen.
+    var endFullScreen: (WKWebView) -> Void = { web in
+        web.evaluateInSearch("if (document.fullscreenElement) document.exitFullscreen(); void 0")
+    }
+
+    /// How the window gets its column back from a page that fills the screen
+    /// (see Tab.immersed). The tests' too.
+    var chromeBack: (WKWebView) -> Void = { web in
+        Browsers.all.lazy.flatMap(\.tabs).first { $0.built === web }?.immersed = false
+    }
+
     /// Pages on a call — camera, microphone or screen in use — kept here
     /// unseen under the one on show when you go to another tab, as long as
     /// the call lasts. Taken out of the window, a page is one WebKit counts
@@ -369,8 +385,63 @@ final class StageView: NSView {
             Self.docks.setObject(dock, forKey: leaving)
             dock.removeFromSuperview()
         }
+        let chosen = page !== wanted
         wanted = page
+        if chosen { bringHome() }
         settle()
+    }
+
+    /// The page wanted here, if WebKit's full-screen window has it and no
+    /// place is kept for it here: another tab was shown in the meantime, and
+    /// the placeholder went with the rest of what wasn't wanted.
+    private var stranded: WKWebView? {
+        guard let web = wanted as? WKWebView, web.fullscreenState != .notInFullscreen,
+              web.superview !== self, !subviews.contains(where: Self.isPlaceholder) else { return nil }
+        return web
+    }
+
+    /// A tab whose video is still full screen in a Space of its own, chosen
+    /// again from another tab. The window's chrome steps aside for a page
+    /// filling the screen (see Tab.immersed), and here there is nothing to
+    /// show and, with the column gone, nothing left to click. So the column
+    /// stays whatever becomes of the video, and the page is taken back here
+    /// once WebKit has let go of it, whenever that is.
+    private func bringHome() {
+        homecoming = nil
+        guard let web = stranded else { return }
+        homecoming = web.observe(\.fullscreenState, options: [.new]) { [weak self] web, _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                switch web.fullscreenState {
+                case .notInFullscreen:
+                    self.homecoming = nil
+                    self.settle()
+                    // WebKit gave the keys back to a page in no window.
+                    if let window = self.window, web.superview === self, window.firstResponder === window {
+                        window.makeFirstResponder(web)
+                    }
+                case .inFullscreen:
+                    // Chosen while still on its way in: only now is it there
+                    // to come back from.
+                    self.release(web)
+                default:
+                    break
+                }
+            }
+        }
+        release(web)
+    }
+
+    /// The column back, after this layout. And full screen ended, if it was
+    /// from this window that the tab was chosen: from the video's own Space,
+    /// a link it opened or a popup closing itself lands on the same tab, with
+    /// the video still being watched, and it stays until it is left.
+    private func release(_ web: WKWebView) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.stranded === web else { return }
+            self.chromeBack(web)
+            if self.window?.isKeyWindow == true { self.endFullScreen(web) }
+        }
     }
 
     private func settle() {
@@ -386,16 +457,33 @@ final class StageView: NSView {
             for view in subviews where view !== web && Self.isPlaceholder(view) && view.frame != bounds {
                 view.frame = bounds
             }
+            // Nothing of its own here: the last tab's page, left as it was,
+            // stood at its old size in a stage grown to the whole window,
+            // with an empty band beside it where the column had been. Nor
+            // the tab shown in front of it while it filled the screen.
+            if homecoming != nil || Shared.prefs.keepsWindow { clearUnwanted() }
             return
         }
 
-        // Anything here that isn't wanted, out. Only ever what is actually
-        // ours: a page may be somewhere else on purpose. Except the Web
-        // Inspector docked beside the page: WebKit puts it here, next to the
-        // web view, and shrinks the page to make room. Taken out on the next
-        // resize, it left the page shrunk beside nothing (#91).
+        clearUnwanted()
+        placeWanted()
+    }
+
+    /// Anything here that isn't wanted, out. Only ever what is actually
+    /// ours: a page may be somewhere else on purpose. Except the Web
+    /// Inspector docked beside the page: WebKit puts it here, next to the
+    /// web view, and shrinks the page to make room. Taken out on the next
+    /// resize, it left the page shrunk beside nothing (#91).
+    private func clearUnwanted() {
         let docked = inspecting
         for view in subviews where view !== wanted && !(docked && Self.isInspector(view)) {
+            // Another tab in front while this page fills the screen: WebKit
+            // brings the page home to its placeholder, so that stays, under
+            // the tab in front, and so does the page on its way back.
+            if Shared.prefs.keepsWindow {
+                if Self.isPlaceholder(view) { continue }
+                if let page = view as? WKWebView, page.fullscreenState != .notInFullscreen { continue }
+            }
             // Unseen, and still drawn: WebKit asks whether its view is in a
             // window and not hidden, not whether anything shows of it.
             if view === parting {
@@ -416,8 +504,11 @@ final class StageView: NSView {
                 continue
             }
         }
+    }
 
+    private func placeWanted() {
         guard let wanted, window != nil else { return }
+        let docked = inspecting
         if wanted.superview === self, wanted.alphaValue == 0, wanted !== parting,
            (wanted as? PageView)?.unpainted != true {
             // Back from being kept for its call: seen again, and over the

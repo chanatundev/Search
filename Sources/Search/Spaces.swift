@@ -13,7 +13,7 @@ import WebKit
 // made by identifier; history and bookmarks are its profile's (see
 // Profiles.swift); the passwords in the keychain, settings and extensions
 // are shared by every space. Switching swaps the row of tabs:
-// the ones left behind are parked, their sound paused, and they sleep
+// the ones left behind are parked, still playing, and they sleep
 // after half an hour as any tab does, pins included unless their site may
 // send notifications (Sleep.swift). ⌃1–⌃9 switch, as in Arc.
 
@@ -181,6 +181,7 @@ enum Spaces {
         if let made = stores[id] { return made }
         let made = WKWebsiteDataStore(forIdentifier: id)
         if Store.keepsSignIns { Store.followSignIns(made) } else { Store.followCookies(made) }
+        BrowserProxy.shared.attach(made)
         stores[id] = made
         return made
     }
@@ -314,27 +315,47 @@ extension Browser {
         return URL(fileURLWithPath: path)
     }
 
-    /// ⌃1–⌃9, ⌃`, and the menu on the space's dot.
+    /// ⌃1–⌃9, ⌃`, and the menu on the space's dot. With profiles in one window,
+    /// a space of another profile brings that profile's window into this
+    /// one's place (see OneWindow.swift).
     func switchSpace(to id: UUID) {
         if !prefs.usesSpaces && spaces.count > 1 { prefs.usesSpaces = true }
         guard prefs.usesSpaces else { return }
+        if merges, !spaces.contains(where: { $0.id == id }), Spaces.known[id] != nil {
+            Browsers.join(space: id, from: self)
+            return
+        }
         enter(id)
     }
 
     func enter(_ id: UUID) {
         spaceSwitcher.cancel()
-        guard id != spaceID, let to = spaces.firstIndex(where: { $0.id == id }) else { return }
+        guard let to = spaces.firstIndex(where: { $0.id == id }) else { return }
         // Already on screen in another window: that window keeps the tabs.
         // Switching here used to open an empty row and, once saved, replace them.
-        if let holder = Browser.holder(of: id, except: self), holder.spaceID == id, !holder.standIn {
+        if id != spaceID, let holder = Browser.holder(of: id, except: self), holder.spaceID == id, !holder.standIn {
             holder.window?.makeKeyAndOrderFront(nil)
             announce("\(spaces[to].name) is open in another window")
             return
         }
         // Which way the icon at the foot turns over: the way the spaces lie.
-        if !makingSpace { spaceStep = to > (spaces.firstIndex { $0.id == spaceID } ?? 0) ? 1 : -1 }
+        // The card for a new space lies past the last one.
+        let here = makingSpace ? spaces.count : (spaces.firstIndex { $0.id == spaceID } ?? 0)
+        if to != here { spaceStep = to > here ? 1 : -1 }
+        // Going to a space from the card puts it away, as Escape does.
+        if makingSpace {
+            cancelSpaceCreation()
+            makingSpace = false
+        }
+        guard id != spaceID else { return }
         cancelTabEdit()
         if floater.showing { land() }
+        let returningVideo = parked[id].map { row in
+            guard let active = row.active else { return false }
+            let visible = prefs.splitView ? row.splits.first { $0.contains(active) }?.tabs ?? [active] : [active]
+            return visible.contains { $0 == floating || $0 == pictured }
+        } ?? false
+        if !returningVideo { leavingSpace() }
         if standIn {
             // The blank a new window opened with is not this space's row.
             for tab in tabs { tab.close() }
@@ -376,6 +397,7 @@ extension Browser {
             showRow([], active: nil)
             restoreSession()
         }
+        returnSpaceVideo()
         editing = active?.isBlank ?? true
         typed = ""
         // A row read from its file just now may hold tabs whose time ran out
@@ -389,20 +411,41 @@ extension Browser {
 
     /// Every other space's row, made ahead of time, so the column can show
     /// the next space beside this one while two fingers bring it in.
-    func preloadSpaces() {
-        for space in spaces where space.id != spaceID && parked[space.id] == nil {
-            // Another window already has this space's tabs. Parking an empty
-            // row here is what made a new window show every space as empty.
-            guard Browser.holder(of: space.id, except: self) == nil else { continue }
-            let row = loadRow(space.id)
-            guard !row.tabs.isEmpty else { continue }
-            parked[space.id] = row
+    /// Gradually, one space a turn of the run loop, the next ones first, so
+    /// a launch with many spaces never holds the window still for all of them.
+    func preloadSpaces(gradually: Bool = false) {
+        guard gradually else {
+            for space in spaces where space.id != spaceID && parked[space.id] == nil {
+                // Another window already has this space's tabs. Parking an empty
+                // row here is what made a new window show every space as empty.
+                guard Browser.holder(of: space.id, except: self) == nil else { continue }
+                let row = loadRow(space.id)
+                guard !row.tabs.isEmpty else { continue }
+                parked[space.id] = row
+            }
+            return
         }
+        guard prefs.usesSpaces, !retired else { return }
+        let at = spaces.firstIndex { $0.id == spaceID } ?? 0
+        let next = spaces.indices
+            .filter { spaces[$0].id != spaceID && parked[spaces[$0].id] == nil
+                && Browser.holder(of: spaces[$0].id, except: self) == nil }
+            .min { abs($0 - at) < abs($1 - at) }
+        guard let next else {
+            // All in memory now: the sweep at launch saw only this row.
+            closeLeftAlone()
+            return
+        }
+        parked[spaces[next].id] = loadRow(spaces[next].id)
+        DispatchQueue.main.async { [weak self] in self?.preloadSpaces(gradually: true) }
     }
 
+    /// The Nth space: of this window's profile, or with profiles in one
+    /// window of every profile's, counted through in the menu's order.
     func switchSpace(index: Int) {
-        guard spaces.indices.contains(index) else { return }
-        switchSpace(to: spaces[index].id)
+        let list = everySpace
+        guard list.indices.contains(index) else { return }
+        switchSpace(to: list[index].id)
     }
 
     /// The icon a new space gets unless told: the first no space wears yet.
@@ -489,7 +532,7 @@ extension Browser {
     func deleteSpace(_ id: UUID) {
         guard id != Space.firstID, id != homeSpaceID, let at = spaces.firstIndex(where: { $0.id == id }) else { return }
         if spaceID == id { switchSpace(to: homeSpaceID) }
-        for tab in parked.removeValue(forKey: id)?.tabs ?? [] { tab.close() }
+        closeParkedSpace(id)
         let shared = spaces[at].sharesSignIns == true
         spaces.remove(at: at)
         Spaces.write(spaces, profile: profileID)
@@ -561,7 +604,8 @@ struct SpaceDot: View {
         .onChange(of: key) { _, now in
             let symbol = symbol
             DispatchQueue.main.async {
-                withAnimation(.easeOut(duration: 0.22)) { shown = (now, symbol) }
+                // With Reduce Motion on, the new icon is simply there.
+                withAnimation(Motion.reduced ? nil : .easeOut(duration: 0.22)) { shown = (now, symbol) }
             }
         }
         .onChange(of: browser.spaceID) { _, _ in name() }
@@ -683,12 +727,24 @@ enum SpaceMenu {
     static func menu(for browser: Browser) -> NSMenu {
         actions = []
         let menu = NSMenu()
-        for (index, space) in browser.spaces.enumerated() {
-            let entry = item(space.name, key: index < 9 ? "\(index + 1)" : "", checked: space.id == browser.spaceID) {
-                browser.switchSpace(to: space.id)
+        // With profiles in one window, every profile's spaces under its name,
+        // ⌃1–⌃9 counting through them all (see OneWindow.swift).
+        let lists: [(name: String?, spaces: [Space])] = browser.merges
+            ? Profiles.shared.list.map { profile in
+                (profile.name, profile.id == browser.profileID ? browser.spaces : Spaces.read(profile: profile.id))
             }
-            entry.image = NSImage(systemSymbolName: space.symbol, accessibilityDescription: nil)
-            menu.addItem(entry)
+            : [(nil, browser.spaces)]
+        var index = 0
+        for list in lists where !list.spaces.isEmpty {
+            if let name = list.name { menu.addItem(.sectionHeader(title: name)) }
+            for space in list.spaces {
+                let entry = item(space.name, key: index < 9 ? "\(index + 1)" : "", checked: space.id == browser.spaceID) {
+                    browser.switchSpace(to: space.id)
+                }
+                entry.image = NSImage(systemSymbolName: space.symbol, accessibilityDescription: nil)
+                menu.addItem(entry)
+                index += 1
+            }
         }
         menu.addItem(.separator())
         menu.addItem(item("New Space…") { browser.askForSpace() })
@@ -732,13 +788,19 @@ enum SpaceMenu {
             menu.addItem(unfold)
             menu.addItem(.separator())
         }
+        // Where this space's downloads go, in one place: the folder in
+        // Settings, or one of its own.
         let folder = here.downloads.map { URL(fileURLWithPath: $0).lastPathComponent }
-        menu.addItem(item(folder.map { "Downloads to “\($0)”…" } ?? "Downloads Folder…") {
-            Ask.folder { browser.setSpaceDownloads(here.id, to: $0) }
-        })
-        if folder != nil {
-            menu.addItem(item("Downloads to the Folder in Settings") { browser.setSpaceDownloads(here.id, to: nil) })
+        let places = NSMenu()
+        places.addItem(item("Same as Settings", checked: folder == nil) { browser.setSpaceDownloads(here.id, to: nil) })
+        if let folder {
+            places.addItem(item("“\(folder)”", checked: true) {})
         }
+        places.addItem(.separator())
+        places.addItem(item("Choose Folder…") { Ask.folder { browser.setSpaceDownloads(here.id, to: $0) } })
+        let downloads = NSMenuItem(title: "Downloads", action: nil, keyEquivalent: "")
+        downloads.submenu = places
+        menu.addItem(downloads)
         if !here.isFirst, here.id != browser.homeSpaceID {
             menu.addItem(.separator())
             menu.addItem(item("Delete “\(here.name)”…") {
@@ -856,9 +918,35 @@ enum Ask {
 }
 
 extension Browser {
+    /// Close a parked row, bringing any video it owns back first.
+    private func closeParkedSpace(_ id: UUID) {
+        guard let row = parked[id] else { return }
+        if let floating, row.tabs.contains(where: { $0.id == floating }) { land(covering: false) }
+        if let pictured, row.tabs.contains(where: { $0.id == pictured }) { unpicture() }
+        for tab in parked.removeValue(forKey: id)?.tabs ?? [] { tab.close() }
+    }
+
     /// A space deleted in another window: this window's row there goes.
     func forget(space id: UUID) {
-        for tab in parked.removeValue(forKey: id)?.tabs ?? [] { tab.close() }
+        closeParkedSpace(id)
         record.rows[id.uuidString] = nil
+    }
+}
+
+/// One space-triggered lift can be in flight while WebKit answers.
+struct SpaceFloatRequest {
+    private(set) var pending: UUID?
+
+    mutating func begin() -> UUID? {
+        guard pending == nil else { return nil }
+        let id = UUID()
+        pending = id
+        return id
+    }
+
+    @discardableResult mutating func finish(_ id: UUID) -> Bool {
+        guard pending == id else { return false }
+        pending = nil
+        return true
     }
 }

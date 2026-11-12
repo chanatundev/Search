@@ -6,9 +6,10 @@ import SwiftUI
 // The site card: what a click on the tab you are on shows under its address,
 // in the column and in the bar across the top alike — whether the connection
 // is private, and the few things that belong to the page (copy its address,
-// print it, its zoom, whether it may play sound by itself, whether its videos
-// float out). Right-click › Site Information… opens the same. It goes as soon
-// as you type, when the address is left, or when one of its lines is used.
+// print it, its zoom, whether the blocker works there, whether it may play
+// sound by itself, whether its videos float out). Right-click › Site
+// Information… opens the same. It goes as soon as you type, when the
+// address is left, or when one of its lines is used.
 // From #56, whose bar it came with; the bar itself stayed out, since Search
 // has the column or the strip, never a second row over the page.
 
@@ -193,6 +194,8 @@ struct SiteCard: View {
 
     /// One step in: the connection, said in full.
     @State private var deeper: Bool
+    @State private var showingPermissions = false
+    @ObservedObject private var notifications = SiteNotifications.shared
     /// Whether this Mac trusts the site's certificate. Unknown until it has
     /// been asked, off the main thread: asking can go to the network.
     @State private var certified: Bool?
@@ -207,7 +210,9 @@ struct SiteCard: View {
 
     var body: some View {
         Group {
-            if deeper, let safety {
+            if showingPermissions {
+                permissions
+            } else if deeper, let safety {
                 security(safety)
             } else {
                 front
@@ -245,6 +250,10 @@ struct SiteCard: View {
             Separator()
             Row("Print…", keys: "⌘P") { after { browser.printPage() } }
             zoom
+            blocker
+            if let url = tab.pageAddress, ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                Row("Site Permissions", submenu: true) { showingPermissions = true }
+            }
             sound
             grounded
             darken
@@ -267,6 +276,52 @@ struct SiteCard: View {
         }
     }
 
+    @ViewBuilder private var permissions: some View {
+        if let url = tab.pageAddress, let scheme = url.scheme, let host = url.host() {
+            let origin = Browser.origin(scheme, host, url.port ?? 0)
+            VStack(alignment: .leading, spacing: 0) {
+                Header(title: origin)
+                if tab.shy {
+                    Text("Permissions aren't saved in a private tab.")
+                        .font(.system(size: 11)).foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                        .padding(.horizontal, MenuMetrics.text).padding(.vertical, 8)
+                } else {
+                    ForEach([CaptureChoices.Kind.camera, .microphone, .location, .notifications]) { kind in
+                        HStack {
+                            Text(kind.title).font(MenuMetrics.font)
+                            Spacer(minLength: 24)
+                            Menu {
+                                Button("Ask") { browser.setSitePermission(nil, kind: kind, origin: origin) }
+                                Button("Allow") { browser.setSitePermission(true, kind: kind, origin: origin) }
+                                    .disabled(kind == .notifications && !prefs.siteNotifications)
+                                Button("Refuse") { browser.setSitePermission(false, kind: kind, origin: origin) }
+                            } label: {
+                                Text(CaptureChoices.choice(kind, origin: origin).title)
+                                    .font(MenuMetrics.font)
+                            }
+                            .accessibilityLabel("\(kind.title): \(CaptureChoices.choice(kind, origin: origin).title)")
+                            .menuStyle(.borderlessButton).fixedSize()
+                        }.padding(.horizontal, MenuMetrics.text).frame(height: MenuMetrics.row)
+                    }
+                    if !prefs.siteNotifications {
+                        Text("Notifications are off in Settings › Privacy.")
+                            .font(.system(size: 11)).foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                            .frame(width: 230, alignment: .leading)
+                            .padding(.horizontal, MenuMetrics.text).padding(.vertical, 6)
+                    }
+                    if [CaptureChoices.Kind.camera, .microphone, .location, .notifications].contains(where: { CaptureChoices.choice($0, origin: origin) == .different }) {
+                        Text("Saved two ways for this site. Pick one to keep.")
+                            .font(.system(size: 11)).foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                            .frame(width: 230, alignment: .leading)
+                            .padding(.horizontal, MenuMetrics.text).padding(.vertical, 6)
+                    }
+                }
+                Separator()
+                Row("Back") { showingPermissions = false }
+            }
+        }
+    }
+
     /// Whether the site's videos float out on their own (see Grounded).
     /// Only on a site they would float from, with one of Settings › General's
     /// Float the video switches on, and not in a private tab.
@@ -284,6 +339,18 @@ struct SiteCard: View {
     @ViewBuilder private var darken: some View {
         if browser.canDusk(tab) {
             Darken(on: Binding(get: { tab.dusked }, set: { browser.dusk($0, tab) }))
+        }
+    }
+
+    /// Whether the blocker works on this site (see Shield.pause), a switch
+    /// like the sound's. Only with the blocker on and nothing wrong with it,
+    /// and not in a private tab, which remembers nothing. The page reloads,
+    /// as the blocker is decided for a page as it starts (#861).
+    @ViewBuilder private var blocker: some View {
+        if !tab.shy, browser.prefs.shielded, Shield.shared.trouble == nil,
+           let url = tab.pageAddress, ["http", "https"].contains(url.scheme?.lowercased()),
+           let host = browser.curtain.host(of: url) {
+            Blocker(host: host) { tab.reload() }
         }
     }
 
@@ -358,6 +425,38 @@ struct SiteCard: View {
             .padding(.trailing, MenuMetrics.trailing)
             .frame(height: MenuMetrics.row)
             .onChange(of: on) { _, value in Autoplay.set(value, for: host) }
+        }
+    }
+
+    /// Its line: on is the blocker at work here.
+    private struct Blocker: View {
+        let host: String
+        let reload: () -> Void
+        @State private var on: Bool
+
+        init(host: String, reload: @escaping () -> Void) {
+            self.host = host
+            self.reload = reload
+            _on = State(initialValue: !Shield.shared.isPaused(on: host))
+        }
+
+        var body: some View {
+            HStack(spacing: 0) {
+                Text("Block Ads and Trackers")
+                    .font(MenuMetrics.font)
+                    .foregroundStyle(Color(nsColor: .labelColor))
+                    .fixedSize()
+                Spacer(minLength: 24)
+                Switch(on: $on)
+            }
+            .padding(.leading, MenuMetrics.text)
+            .padding(.trailing, MenuMetrics.trailing)
+            .frame(height: MenuMetrics.row)
+            .help("Turn off here if the site breaks; the page reloads")
+            .onChange(of: on) { _, value in
+                Shield.shared.pause(host, !value)
+                reload()
+            }
         }
     }
 

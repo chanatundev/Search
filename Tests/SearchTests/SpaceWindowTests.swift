@@ -51,6 +51,9 @@ final class SpaceWindowTests: XCTestCase {
         )
         let first = Browser(record: kept)
         Browsers.register(first)
+        // The other spaces' rows are made after the first frame (see
+        // Browser.restoreSession); this test doesn't wait for that frame.
+        first.preloadSpaces()
         let school = try XCTUnwrap(first.tabs.first { $0.address?.host == "school.example" })
         let work = try XCTUnwrap(first.parked[business.id]?.tabs.first { $0.address?.host == "work.example" })
 

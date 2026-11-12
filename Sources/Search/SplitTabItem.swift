@@ -31,6 +31,8 @@ struct SplitTabItem: View {
 
     @Environment(\.greys) private var greys
     @State private var hovered: Tab.ID?
+    /// Carried and about to come apart: the half that stays dims.
+    @ObservedObject private var separation = PairSeparation.shared
 
     private var stacked: Bool { width == nil }
     /// Across the top, the outline is as tall as a tab's pill (28 points)
@@ -110,6 +112,14 @@ struct SplitTabItem: View {
             hovered: $hovered
         )
         .frame(maxWidth: .infinity, maxHeight: stacked ? height : .infinity)
+        .opacity(staying(tab) ? 0.35 : 1)
+        .animation(Motion.quick, value: separation.leaving)
+    }
+
+    /// The other half of the one a carried pair is letting go of.
+    private func staying(_ tab: Tab) -> Bool {
+        guard let leaving = separation.leaving, leaving != tab.id else { return false }
+        return leaving == left.id || leaving == right.id
     }
 
     /// Across the top: one cross, at the end of the item, for whichever half
@@ -182,7 +192,7 @@ private struct SplitTabHalf: View {
     private var handled: some View {
         laidOut
             .modifier(OneClick(double: false) {
-                guard interactive, !stacked || !selectedOnPress, NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty else { return }
+                guard interactive, !stacked || !selectedOnPress, TabClick.flags.intersection([.command, .shift, .option]).isEmpty else { return }
                 browser.clearTabSelection()
                 if focused { browser.beginTabEdit(tab) }
                 else { browser.focusPane(tab) }
@@ -190,6 +200,7 @@ private struct SplitTabHalf: View {
             .modifier(ModifiedTabClick {
                 if interactive && !editing { browser.extendTabSelection(to: tab, modifiers: $0) }
             })
+            .modifier(OptionClick { if interactive && !editing { browser.optionClick(tab) } })
             .overlay {
                 if browser.selectedTabIDs.contains(tab.id) {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -269,7 +280,7 @@ private struct SplitTabHalf: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .frame(height: stacked ? height : 16)
                 .contentShape(Rectangle())
-                .modifier(TabPress(enabled: stacked && interactive && !editing && !(browser.selectedTabIDs.contains(tab.id) && browser.selectedTabs.count > 1), active: focused, selected: $selectedOnPress) {
+                .modifier(TabPress(enabled: stacked && interactive && !editing && !browser.isPickedAmongOthers(tab), active: focused, selected: $selectedOnPress) {
                     browser.clearTabSelection()
                     browser.focusPane(tab)
                 })
@@ -292,8 +303,8 @@ private struct SplitTabHalf: View {
                 .frame(height: 16)
         } else {
             HStack(spacing: stacked ? 8 : 5) {
-                if prefs.glyph == .icons || narrow {
-                    Mark(icon: tab.icon, letter: tab.monogram, size: stacked ? 15 : 13, dim: tab.asleep)
+                if prefs.glyph == .icons || !tab.isBlank || narrow {
+                    Mark(icon: prefs.glyph == .icons ? tab.icon : nil, letter: tab.monogram, size: stacked ? 15 : 13, dim: tab.asleep)
                         .frame(width: stacked ? 15 : 13, height: stacked ? 15 : 13)
                 }
                 if tab.shy {

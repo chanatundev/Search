@@ -10,8 +10,13 @@ browser. The fork's history contains upstream. Update it by **merging the tip of
 `upstream/main`**. Previous syncs went past the latest release tag, so follow
 `main`, not tags. Never rebase fork commits and never force-push `origin`.
 
-The installed fork is ad-hoc signed, so its updater can't install upstream
-releases by itself. Instead, a "Search X is out" prompt appears, and that prompt is
+The fork's own builds can now be notarized: `./build.sh release ship` signs with a
+Developer ID certificate and notarises the image and ZIP through the `search`
+notarytool profile (`SEARCH_NOTARY_PROFILE` names another). Without those on the
+Mac, `./build.sh` stays ad-hoc signed and runs only here. Either way, the updater
+still trusts only feeds signed by Office Commun's team (`7BYKA895MC`, see
+`Updater.team`), so a notarized fork build can't take an upstream release by itself.
+Instead, a "Search X is out" prompt appears, and that prompt is
 the cue to run this sync. Never choose "Download Update": it installs Office
 Commun's build over the fork.
 
@@ -66,10 +71,12 @@ fork's intent on top of it. Take one side wholesale only when a row below says s
 |---|---|
 | Command palette: `CommandPalette.swift`, the "Command Palette…" `⌘E` menu item in `App.swift`, the palette sheet and `browser.commandPalette` guards | Keep. When upstream adds a new browser action, menu command, or panel, add it to the palette's action list too. |
 | Sleep actions: `Sleep.swift` and its palette entries | Keep. Port to upstream's tab and Space model if upstream changed it. |
-| Multi-tab selection in `Browser.swift`, `TabBar.swift`, `Side.swift` and `App.swift`: `⌘`-click and `⌘⇧`-click selection, copy URLs, `⇧⌘V` multi-paste, close selected, move to Space | Keep. Union tab context menus with upstream's new items. New tab layouts from upstream, such as pinned rows, groups, or Split View panes, must still support selection. |
+| Multi-tab selection in `Browser.swift`, `TabBar.swift`, `Side.swift` and `App.swift`: `⌘`-click and `⌘⇧`-click selection, copy URLs, `⇧⌘V` multi-paste, close selected, move to Space | Upstream's selection is the base (`selectedTabIDs`, `pickedTabs`, `isPickedAmongOthers`, `carried(with:)`, `closePickedTabs`). Port the fork's actions onto `pickedTabs` (`tabsForAction(on:)`, `tabsWithAddressesToCopy`). Take upstream's menus and drag code. New tab layouts from upstream, such as pinned rows, groups, or Split View panes, must still support selection. |
+| `⌃Tab` walk in `TabSwitcher.swift` and `switcherBehindFirst` in `Prefs.swift` | Tab order is the default. Upstream's setting stays, and on by default it keeps tab order. Keep both `ordered` cases: the ring from the tab on screen, and the last-tab-left card when the setting is off. |
 | Space switching (`1`–`9`) in the palette | Keep, and follow upstream's Space API. |
 | `README.md` | Keep the fork section above `# Upstream Search`. Replace everything below that heading with upstream's `README.md` minus its `# Search` title line, then put back fork rows in it, such as the `⌘E` row in the shortcuts table. |
-| `build.sh` | Take upstream's version, then keep the fork's `xattr -cr "$APP"` line before codesigning. |
+| `build.sh` | Take upstream's version, then keep the fork's `xattr -cr "$APP"` line before codesigning. Keep upstream's notarising `release ship` path as it is. Keep the fork's icon: its PNG makes the `.icns` and `SearchLogo.png`, and upstream's `Assets.car` (Icon Composer) is left out, since it would override the fork's icon in the Dock. |
+| `fresh.sh`, `tap.sh`, `engine.sh` | `tap.sh` publishes Office Commun's Homebrew cask, so it isn't run for the fork. `fresh.sh` and `engine.sh`: take upstream's version. |
 | `CHANGELOG.md`, `ROADMAP.md`, `VERSION`, `CONTRIBUTING.md`, `SECURITY.md`, `publish.sh`, `Updater.swift`, `skill/`, `Tests/` | Take upstream's version. These files have no fork edits. If `git log $MB..HEAD -- <file>` shows otherwise, treat that file like a fork feature. |
 
 ## When to ask
@@ -115,7 +122,9 @@ failing and passes on `main`.
 If the build fails in a file you didn't touch, it's usually a fork feature
 calling an API upstream renamed. Fix the fork code, not upstream's. Offer to run
 `./build.sh` so the user can try `⌘E`, multi-select, and move-to-Space in a real
-`.app`. Don't click through the UI yourself unless the user asks you to.
+`.app`. If the Mac has a Developer ID certificate and the `search` notarytool profile,
+offer `./build.sh release ship` instead, for a notarized build to hand to someone else.
+Don't click through the UI yourself unless the user asks you to.
 
 ## 5. Commit and land
 

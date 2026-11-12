@@ -31,6 +31,10 @@ struct WindowRecord: Codable {
     var rows: [String: Session.Shape] = [:]
     /// The saved website for a standalone web app window, if this is one.
     var webApp: WebApp?
+    /// The merged window it was one of, and whether it was tucked behind
+    /// the one on screen (see OneWindow.swift). Nil for a window of its own.
+    var merge: UUID?
+    var tucked: Bool?
 
     init(space: UUID = Space.firstID) { self.space = space }
 
@@ -41,6 +45,8 @@ struct WindowRecord: Codable {
         space = (try? values.decode(UUID.self, forKey: .space)) ?? Space.firstID
         rows = (try? values.decode([String: Session.Shape].self, forKey: .rows)) ?? [:]
         webApp = try? values.decodeIfPresent(WebApp.self, forKey: .webApp)
+        merge = try? values.decode(UUID.self, forKey: .merge)
+        tucked = try? values.decode(Bool.self, forKey: .tucked)
     }
 
     var rect: NSRect? { frame.map(NSRectFromString).flatMap { $0.width > 100 && $0.height > 100 ? $0 : nil } }
@@ -121,6 +127,13 @@ enum Browsers {
 
     /// A window of ours came to the front.
     static func becameKey(_ browser: Browser) {
+        // A tucked window brought forward by something else — SwiftUI
+        // showing its own window again, a script: it is the one in front
+        // now, and the one it was tucked behind steps out of sight.
+        if browser.tucked, let head = OneWindow.head(of: browser) {
+            bring(browser, over: head)
+            return
+        }
         register(browser)
         browser.shut = false
         Front.shared.set(browser)
@@ -135,7 +148,7 @@ enum Browsers {
     /// new one, with one empty tab, in the space of the window in front.
     static func newWindow() {
         if bringBack() { return }
-        if let kept = all.first(where: { !$0.isOpen }) {
+        if let kept = all.first(where: { !$0.isOpen && !$0.tucked }) {
             show(kept)
             return
         }
@@ -145,6 +158,15 @@ enum Browsers {
 
     /// Brings a browser's window on screen, the scene's included.
     static func show(_ browser: Browser) {
+        // One tucked behind another profile's window: it takes that one's place.
+        if browser.tucked {
+            if let head = OneWindow.head(of: browser) {
+                bring(browser, over: head)
+                comeForward()
+                return
+            }
+            browser.tucked = false
+        }
         browser.shut = false
         if let window = browser.window {
             Bench.keepOff(window)
@@ -165,7 +187,7 @@ enum Browsers {
         bringBack()
         if let front, front.isOpen, !front.isPopup { return front }
         if let open = all.last(where: { $0.isOpen && !$0.isPopup }) { return open }
-        let kept = all.first ?? SceneSlot.shared.browser
+        let kept = all.first { $0.shut && !$0.isPopup } ?? all.first ?? SceneSlot.shared.browser
         show(kept)
         return kept
     }
@@ -230,6 +252,13 @@ enum Browsers {
         // a window with no frame and no NSWindow behind it (#408, lulkebit).
         register(browser)
         Bench.keepOff(window)
+        // One of a merged window: never animated in or out, and one tucked
+        // behind another profile's stays out of sight (see OneWindow.swift).
+        if browser.mergeID != nil { window.animationBehavior = .none }
+        if browser.tucked {
+            window.isExcludedFromWindowsMenu = true
+            return
+        }
         // A window brought back from last time while a link's small window
         // keeps them away: off screen with the rest (see keepAway).
         if keptAway, !popup {
@@ -281,7 +310,7 @@ enum Browsers {
     /// its browser: known then by the name its frame is kept under.
     private static func isBrowserWindow(_ window: NSWindow) -> Bool {
         guard window.contentView != nil, !(window is NSPanel), LittleWindow.owning(window) == nil else { return false }
-        if let browser = browser(for: window) { return !browser.isPopup }
+        if let browser = browser(for: window) { return !browser.isPopup && !browser.tucked }
         return window.frameAutosaveName == sceneID
     }
 
@@ -335,8 +364,16 @@ enum Browsers {
             retire(browser, remembered: false)
             return
         }
+        // A tucked window closed by something other than you (a script, an
+        // extension): it goes alone.
+        if browser.tucked {
+            retire(browser)
+            return
+        }
         let others = all.filter { $0 !== browser && $0.isOpen && !$0.isPopup }
         guard !others.isEmpty else {
+            // Its tucked windows stay with it, kept as they are: the merged
+            // window comes back whole.
             // The last one: kept, tabs and all, and written down now. Its
             // pages sleep, as Safari and Chrome close theirs: the tabs are
             // there when it comes back, the one in front woken.
@@ -345,6 +382,13 @@ enum Browsers {
             save(now: true)
             browser.sleepShut()
             return
+        }
+        // A merged window closes whole: the windows tucked behind this one go
+        // with it, written down first so ⇧⌘T brings them back together.
+        for sibling in OneWindow.siblings(of: browser) {
+            let window = sibling.window
+            retire(sibling)
+            window?.close()
         }
         retire(browser)
     }
@@ -356,7 +400,7 @@ enum Browsers {
         let owned = browser.usesFiles && !browser.isPopup
         if owned { browser.leaveFiles() }
         if remembered {
-            closed.append((record(of: browser, rows: true), Date()))
+            closed.append((record(of: browser, rows: true, keeping: true), Date()))
             if closed.count > 10 { closed.removeFirst(closed.count - 10) }
         }
         let heir = all.first { $0 !== browser && $0.extensionPopup == nil }
@@ -378,6 +422,10 @@ enum Browsers {
     /// A window gone with its profile (see Profiles.delete): closed, its
     /// tabs not kept for ⇧⌘T.
     static func discard(_ browser: Browser) {
+        // The one on screen of a merged window: another of it takes its place.
+        if !browser.tucked, let heir = OneWindow.siblings(of: browser).first(where: \.tucked) {
+            bring(heir, over: browser)
+        }
         let window = browser.window
         retire(browser, remembered: false)
         window?.close()
@@ -389,6 +437,18 @@ enum Browsers {
         guard let last = closed.popLast() else { return false }
         let browser = Browser(record: last.record)
         open(browser, frame: last.record.rect)
+        // The windows that were tucked behind it, back behind it.
+        if OneWindow.on, let merge = last.record.merge {
+            browser.mergeID = merge
+            while let sibling = closed.last, sibling.record.merge == merge {
+                closed.removeLast()
+                let tucked = Browser(record: sibling.record)
+                tucked.mergeID = merge
+                tucked.tucked = true
+                open(tucked, frame: browser.window?.frame ?? sibling.record.rect)
+            }
+            OneWindow.tidy()
+        }
         save()
         return true
     }
@@ -401,11 +461,13 @@ enum Browsers {
 
     /// A window's state as a record: frame, space, and — for any but the
     /// oldest, or when it is going away — its rows.
-    static func record(of browser: Browser, rows: Bool) -> WindowRecord {
+    static func record(of browser: Browser, rows: Bool, keeping: Bool = false) -> WindowRecord {
         var record = browser.record
         record.space = browser.spaceID
         if let window = browser.window { record.frame = NSStringFromRect(window.frame) }
-        if rows { record.rows = browser.allRows() }
+        if rows { record.rows = browser.allRows(keeping: keeping) }
+        record.merge = browser.mergeID
+        record.tucked = browser.tucked ? true : nil
         return record
     }
 
@@ -469,14 +531,28 @@ enum Browsers {
     static func restore() {
         let records = read()
         guard records.count > 1 else { return }
+        // Merged windows come back merged (see OneWindow.swift): the one
+        // you were in on screen, the others tucked behind it.
+        let merging = OneWindow.on
+        if merging, let primary { primary.mergeID = records[0].merge }
         for record in records.dropFirst() {
-            open(Browser(record: record), frame: record.rect)
+            let browser = Browser(record: record)
+            if merging, let merge = record.merge {
+                browser.mergeID = merge
+                browser.tucked = record.tucked == true
+            }
+            open(browser, frame: record.rect)
         }
+        if merging, let primary, records[0].tucked == true,
+           let head = OneWindow.siblings(of: primary).first(where: { !$0.tucked }) {
+            bring(head, over: primary)
+        }
+        if merging { OneWindow.tidy() }
         // The first window in front, as the app opens; not while they are
-        // kept away.
+        // kept away. Of a merged window, the one on screen.
         DispatchQueue.main.async {
-            guard !keptAway else { return }
-            primary?.window?.makeKeyAndOrderFront(nil)
+            guard !keptAway, let primary else { return }
+            (OneWindow.head(of: primary) ?? primary).window?.makeKeyAndOrderFront(nil)
         }
     }
 
@@ -484,6 +560,10 @@ enum Browsers {
     static func flush() {
         for browser in all { browser.flushSession() }
         save(now: true)
+        // A visit or an icon from the last second or so, still waiting to be
+        // written.
+        Profiles.flushHistories()
+        Favicons.shared.flush()
     }
 
     /// The window has moved or changed size.

@@ -163,18 +163,19 @@ struct IconTile: View {
         }
         .modifier(Give(pressed: pressed && prefs.tabsGive))
         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .modifier(TabPress(enabled: interactive && !(browser.selectedTabIDs.contains(tab.id) && browser.selectedTabs.count > 1), active: live, selected: $selectedOnPress, pressing: $pressed) {
+        .modifier(TabPress(enabled: interactive && !browser.isPickedAmongOthers(tab), active: live, selected: $selectedOnPress, pressing: $pressed) {
             browser.clearTabSelection()
             browser.select(tab)
         })
         .modifier(OneClick(double: live) {
-            guard interactive, !selectedOnPress, NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty else { return }
+            guard interactive, !selectedOnPress, TabClick.flags.intersection([.command, .shift, .option]).isEmpty else { return }
             browser.clearTabSelection()
             // The tile you're on has no room for its address: a click opens
             // the field over the page, as ⌘L does in this column.
             if live { browser.beginTabEdit(tab) } else { browser.select(tab) }
         })
         .modifier(ModifiedTabClick { if interactive { browser.extendTabSelection(to: tab, modifiers: $0) } })
+        .modifier(OptionClick { if interactive { browser.optionClick(tab) } })
         .overlay { if interactive { MiddleClick(act: close) } }
         .onHover { over in hovering = over }
         .onAppear {
@@ -206,7 +207,7 @@ struct IconTile: View {
         .accessibilityLabel(tip)
         .accessibilityAddTraits(.isButton)
         .accessibilityAction(named: "Close tab") { if interactive { close() } }
-        .animation(Motion.quick, value: hovering)
+        .animation(nil, value: hovering)
         .animation(Motion.quick, value: tab.loading)
         .animation(Motion.quick, value: speaker)
         .animation(Motion.quick, value: tab.recording)
@@ -261,6 +262,8 @@ struct IconPair: View {
     let pill: Namespace.ID
 
     @Environment(\.greys) private var greys
+    /// Carried and about to come apart: the half that stays dims.
+    @ObservedObject private var separation = PairSeparation.shared
 
     private var focused: Tab.ID? { live ? (focusedID ?? browser.activeID) : nil }
 
@@ -269,6 +272,7 @@ struct IconPair: View {
             half(left)
             half(right)
         }
+        .animation(Motion.quick, value: separation.leaving)
         .background {
             // The pair's own ground, lighter than the live grey that sits on
             // the half the keys go to.
@@ -289,6 +293,7 @@ struct IconPair: View {
     private func half(_ tab: Tab) -> some View {
         IconTile(browser: browser, prefs: prefs, tab: tab, live: focused == tab.id, pill: pill,
                  close: { browser.closeTab(tab) }, interactive: interactive, half: true)
+            .opacity(separation.leaving.map { $0 != tab.id && ($0 == left.id || $0 == right.id) } == true ? 0.35 : 1)
             .background {
                 if focused == tab.id {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)

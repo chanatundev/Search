@@ -27,7 +27,11 @@ enum SiteSearch {
     /// Checked by hand on 28 Sep 2026, each opened with a word to find: the
     /// search comes back, or the site's sign-in or consent page does and
     /// goes on to it after (X, Claude, Google Maps).
-    static var builtIn: [SearchSite] {
+    ///
+    /// Made once: the field reads the list for every row on every key, and
+    /// each making asked the system for the languages and region again.
+    static var builtIn: [SearchSite] { made }
+    private static let made: [SearchSite] = {
         [
             SearchSite(name: "Google", host: "google.com", template: "https://www.google.com/search?q=%s"),
             SearchSite(name: "Reddit", host: "reddit.com", template: "https://www.reddit.com/search/?q=%s"),
@@ -48,7 +52,7 @@ enum SiteSearch {
             SearchSite(name: "Figma Community", host: "figma.com/community",
                        template: "https://www.figma.com/community/search?resource_type=mixed&sort_by=relevancy&query=%s"),
         ]
-    }
+    }()
 
     /// Wikipedia in the Mac's first language.
     private static var language: String {
@@ -78,10 +82,11 @@ enum SiteSearch {
 
     /// The site the words typed so far begin the name of, if any, two
     /// letters at least. A built-in one by the start of its name, its
-    /// address or one of its other names; a learned one by the start of its
-    /// address only — never by the name it gives itself, which could be
-    /// anyone's ("Google", a bank's). Words with a space in them name only a
-    /// site whose name has one: "google m" is Google Maps, "red panda" nothing.
+    /// address or one of its other names; a site shortcut from Settings by
+    /// its keyword; a learned one by the start of its address only — never
+    /// by the name it gives itself, which could be anyone's ("Google", a
+    /// bank's). Words with a space in them name only a site whose name has
+    /// one: "google m" is Google Maps, "red panda" nothing.
     ///
     /// Which, when several begin that way: one the words name whole ("google",
     /// "yt"); else the one with the shortest name they begin — "goo" is Google,
@@ -92,7 +97,7 @@ enum SiteSearch {
     /// `learnedToo`: the sites learned from visits are Personal's (see
     /// Profiles.swift); another profile's window is offered the built-in
     /// ones only, so no profile's field says where another has been.
-    static func match(_ typed: String, learnedToo: Bool = true,
+    static func match(_ typed: String, learnedToo: Bool = true, keywords: [Keyword] = [],
                       visits: ([SearchSite]) -> [String: Int] = { _ in [:] }) -> SearchSite? {
         let word = typed.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
         guard word.count >= 2, !word.contains("/") else { return nil }
@@ -105,6 +110,20 @@ enum SiteSearch {
         struct Found { let site: SearchSite; let length: Int; let whole: Bool; let builtIn: Bool }
         var found: [Found] = []
         for site in builtIn {
+            let fits = names(site).filter { $0.hasPrefix(word) }
+            guard let length = fits.map(\.count).min() else { continue }
+            found.append(Found(site: site, length: length, whole: fits.contains(word), builtIn: true))
+        }
+        for keyword in keywords where Keyword.accepts(keyword.template) {
+            let key = keyword.keyword.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let host = keyword.name
+            let name = host.split(separator: ".").first.map { $0.prefix(1).uppercased() + $0.dropFirst().lowercased() } ?? key
+            let site = SearchSite(
+                name: name,
+                host: host,
+                template: keyword.template,
+                aliases: [key]
+            )
             let fits = names(site).filter { $0.hasPrefix(word) }
             guard let length = fits.map(\.count).min() else { continue }
             found.append(Found(site: site, length: length, whole: fits.contains(word), builtIn: true))
@@ -137,6 +156,77 @@ enum SiteSearch {
             return busiest.site
         }
         return first.site
+    }
+
+    // MARK: - what was searched there before
+
+    /// The words a search page of this site was asked, read back out of its
+    /// address, or nil when the address isn't one of the site's searches.
+    static func words(in url: URL, searchedOn site: SearchSite) -> String? {
+        guard let words = Shape(site.template)?.words(in: url)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !words.isEmpty, words.count <= 200, !words.contains(where: \.isNewline) else { return nil }
+        return words
+    }
+
+    /// The words this site was searched for before, newest first and each
+    /// once, read back out of the search pages in the history: where the
+    /// site's template puts them, a query's value ("?q=%s") or the end of
+    /// the path ("/search/%s"). Nothing is asked of anyone: a site with no
+    /// suggestions of its own (Reddit, GitHub) still has what you searched
+    /// it for.
+    static func pastSearches(on site: SearchSite, in traces: [History.Trace], most: Int = 50) -> [String] {
+        guard let shape = Shape(site.template) else { return [] }
+        var seen: Set<String> = []
+        var out: [String] = []
+        for trace in traces {
+            guard let words = shape.words(in: trace.url) else { continue }
+            let clean = words.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !clean.isEmpty, clean.count <= 200, !clean.contains(where: \.isNewline),
+                  seen.insert(clean.lowercased()).inserted else { continue }
+            out.append(clean)
+            if out.count == most { break }
+        }
+        return out
+    }
+
+    /// Where a template puts the words, to find them again in an address.
+    private struct Shape {
+        let host: String
+        let path: String
+        /// The query item that holds them, or nil when the path ends with them.
+        let item: String?
+
+        init?(_ template: String) {
+            guard let parts = URLComponents(string: template.replacingOccurrences(of: "%s", with: "SEARCHWORDS")),
+                  let host = parts.host?.lowercased() else { return nil }
+            self.host = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+            if let item = parts.queryItems?.first(where: { $0.value == "SEARCHWORDS" }) {
+                path = parts.path
+                self.item = item.name
+            } else if parts.path.hasSuffix("SEARCHWORDS") {
+                path = String(parts.path.dropLast("SEARCHWORDS".count))
+                item = nil
+            } else {
+                return nil
+            }
+        }
+
+        func words(in url: URL) -> String? {
+            guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  var host = parts.host?.lowercased() else { return nil }
+            if host.hasPrefix("www.") { host = String(host.dropFirst(4)) }
+            guard host == self.host else { return nil }
+            if let item {
+                guard parts.path == path || parts.path == path + "/" || path == parts.path + "/" else { return nil }
+                // A form's own submit writes spaces as +.
+                return parts.percentEncodedQueryItems?.first(where: { $0.name == item })?.value?
+                    .replacingOccurrences(of: "+", with: " ").removingPercentEncoding
+            }
+            guard parts.path.hasPrefix(path) else { return nil }
+            let rest = String(parts.path.dropFirst(path.count))
+            guard !rest.isEmpty, !rest.contains("/") else { return nil }
+            return rest
+        }
     }
 
     // MARK: - learned from sites you visit (OpenSearch)
@@ -178,7 +268,9 @@ enum SiteSearch {
         var request = URLRequest(url: description, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
         request.httpShouldHandleCookies = false
         // Redirected only within the site: nothing is read from one not visited.
-        let session = URLSession(configuration: .ephemeral, delegate: SameSiteRedirects(host: host), delegateQueue: .main)
+        let configuration = URLSessionConfiguration.ephemeral
+        ProxyNetwork.stamp(configuration)
+        let session = URLSession(configuration: configuration, delegate: SameSiteRedirects(host: host), delegateQueue: .main)
         session.dataTask(with: request) { data, response, _ in
             defer { session.finishTasksAndInvalidate() }
             guard let data, data.count <= 64 * 1024, (response as? HTTPURLResponse)?.statusCode == 200,

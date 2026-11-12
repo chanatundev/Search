@@ -31,6 +31,9 @@ enum SidePanelContent: Equatable {
     case page(extensionID: String, url: URL, tab: Tab.ID?)
     /// A website, in the space the window was in when it opened.
     case site(url: URL, space: UUID)
+    /// Downloads, for whoever chose it in Settings › Downloads › Open
+    /// Downloads: the same list as its tab, beside every page.
+    case downloads
 }
 
 /// The sites offered in View › Side Panel, as they are typed: a short list,
@@ -143,6 +146,21 @@ extension Browser {
     /// doesn't list. Never another profile's, whatever Spaces.current is.
     func panelStore(_ space: UUID) -> WKWebsiteDataStore {
         spaces.contains(where: { $0.id == space }) ? Spaces.store(for: space) : Profiles.store(profileID)
+    }
+
+    /// Downloads in the side panel; again, and it goes. Whatever page was
+    /// there is let go, as another site replacing it would be. A popup
+    /// window has no panel, so there it opens as a tab.
+    func toggleDownloadsPanel(closes: Bool = true) {
+        if sidePanelShown, sidePanel == .downloads {
+            if closes { closeSidePanel() }
+            return
+        }
+        guard !isPopup else { hoarding = true; return }
+        if case .page(_, _, let tab?) = sidePanel { SidePanelPages.shared.unbind(tab, in: self) }
+        SidePanelPages.shared.drop(in: self)
+        sidePanel = .downloads
+        sidePanelShown = true
     }
 
     /// The tab's page into the side panel, from the tab's menu. Not a
@@ -373,6 +391,13 @@ private final class SitePanelDelegate: NSObject, ObservableObject, WKNavigationD
     weak var browser: Browser?
     init(browser: Browser) { self.browser = browser }
 
+    /// The window, for a page that asks its size: a site in the panel reads
+    /// it as a tab's page does (see Browser.windowFrame, #666).
+    @objc(_webView:getWindowFrameWithCompletionHandler:)
+    func webView(_ webView: WKWebView, getWindowFrameWithCompletionHandler done: @escaping (CGRect) -> Void) {
+        done(browser?.windowFrame(for: webView) ?? webView.window?.frame ?? .zero)
+    }
+
     /// The page that arrived: set when a main-frame navigation commits, and
     /// as the address moves inside the same site (a link the page handles
     /// itself, history.pushState). A page only asked for, or on its way,
@@ -400,7 +425,7 @@ private final class SitePanelDelegate: NSObject, ObservableObject, WKNavigationD
 
     /// Crashes in a row: the page is made again twice a minute at most, then
     /// left as it is (the panel's line still closes it or opens it in a tab).
-    private var crashes: [Date] = []
+    private var crashes = CrashCount()
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -436,16 +461,14 @@ private final class SitePanelDelegate: NSObject, ObservableObject, WKNavigationD
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        let now = Date()
-        crashes = crashes.filter { now.timeIntervalSince($0) < 60 } + [now]
-        guard crashes.count <= 2 else { return }
+        guard crashes.another() else { return }
         reloads += 1
         webView.reload()
     }
 
     /// How many times the page was made again, for the bench.
     private(set) var reloads = 0
-    var gaveUp: Bool { crashes.count > 2 }
+    var gaveUp: Bool { crashes.gaveUp }
 }
 
 /// The panel page's own delegate: a link it opens elsewhere goes to a tab,
@@ -593,6 +616,11 @@ struct SidePanelView: View {
                 Rectangle().fill(Palette.hairline).frame(height: 1)
                 PanelPage(web: SidePanelPages.shared.web(in: browser))
             }
+        case .downloads:
+            // As tall as the panel, as its list is in a tab.
+            DownloadsPanel(browser: browser, loot: browser.loot, compact: true,
+                           close: { browser.closeSidePanel() })
+                .environment(\.asTab, true)
         case nil:
             Color.clear
         }
@@ -686,8 +714,14 @@ struct SidePanelBeside: View {
     let card: Bool
     /// As wide as it is drawn: the width asked for, or less in a narrow window.
     let width: CGFloat
+    /// The width while the handle is held, nil once it is let go, for the
+    /// window to draw the panel and the page at (see HeldEdges).
+    var onDrag: (CGFloat?) -> Void = { _ in }
 
     @State private var start: CGFloat?
+    /// The width while the handle is held. The setting is written once, when
+    /// it is let go, as the column's is (see SideBar.edge).
+    @State private var live: CGFloat?
     @State private var over = false
 
     var body: some View {
@@ -728,11 +762,26 @@ struct SidePanelBeside: View {
                         let from = start ?? prefs.sidePanelWidth
                         if start == nil { start = from }
                         let moved = drag.translation.width
-                        prefs.sidePanelWidth = from + (onLeft ? moved : -moved)
+                        let wanted = from + (onLeft ? moved : -moved)
+                        let kept = Preferences.sidePanelWidths
+                        live = min(max(wanted, kept.lowerBound), kept.upperBound)
+                        onDrag(live)
                     }
-                    .onEnded { _ in start = nil }
+                    .onEnded { _ in
+                        if let live { prefs.sidePanelWidth = live }
+                        live = nil
+                        start = nil
+                        onDrag(nil)
+                    }
             )
             // Double-click: back to where it starts.
             .onTapGesture(count: 2) { prefs.sidePanelWidth = Preferences.sidePanelStart }
+            // Gone while held, the gesture never ends (see SideBar).
+            .onDisappear {
+                guard live != nil else { return }
+                live = nil
+                start = nil
+                onDrag(nil)
+            }
     }
 }

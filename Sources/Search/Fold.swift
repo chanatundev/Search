@@ -44,7 +44,17 @@ import SwiftUI
 extension Browser {
     /// ⌘S. The column, or the strip across the top, out of the way, or back.
     func toggleFold() {
-        peeking = false
+        // Asked to keep the tabs in sight: the column goes to icons only and
+        // back to its titles, the layout Settings calls Icons only, and is
+        // not folded away. One folded before the switch was turned on comes
+        // out first, as it always did.
+        if prefs.shrinks, !folded {
+            withAnimation(Motion.glide) { prefs.sideIcons.toggle() }
+            return
+        }
+        // Only if it was out: set at all, every row of the column is built
+        // again, 30 of them with 30 tabs, before the slide starts.
+        if peeking { peeking = false }
         withAnimation(Motion.folding(out: folded)) { folded.toggle() }
     }
 
@@ -53,25 +63,58 @@ extension Browser {
         withAnimation(Motion.folding(out: out)) { peeking = out }
     }
 
+    /// A page filling the screen in front of this window. With
+    /// Preferences.keepsWindow, one settled in a Space of its own isn't, once
+    /// this window's Space is the one in view: the window is whole again, to
+    /// be used beside the video.
+    func fillsHere(_ tab: Tab) -> Bool {
+        guard tab.immersed else { return false }
+        guard prefs.keepsWindow, let window, tab.built?.fullscreenState == .inFullscreen else { return true }
+        return !window.isOnActiveSpace
+    }
+
+    /// The tab in front is such a page.
+    var frontFillsHere: Bool { active.map(fillsHere) ?? false }
+
     /// Whether something of the window's lies over `page` at `point`, in the
     /// window's own coordinates: a peek over the page in front (not over its
-    /// own), or the folded column or strip out over the page. The page then
+    /// own), the address field or a panel over it, the Find bar, or the
+    /// folded column or strip out over the page. The page then
     /// hears nothing of the pointer there (see PageView.underCover).
     func covers(_ page: NSView, at point: NSPoint) -> Bool {
         guard let window, page.window === window else { return false }
         if let peek = peekTab, peek.built !== page { return true }
-        guard folded, peeking, active?.immersed != true, let size = window.contentView?.bounds.size else { return false }
+        // The address field raised over the page in front, by ⌘L or by ⌘T's
+        // floating field, dims all of that page and only that page: with
+        // Split View on, the other pane is still there to point at.
+        if editing, let active, !active.isBlank, active.built === page { return true }
+        // What comes over the whole window: the ⌃Tab switcher, the hidden
+        // elements' list (a click beside it puts it away), Welcome and
+        // What's New.
+        if tabSwitcher.visible || reviewing || welcoming || newsShowing { return true }
+        // The Find bar is a pill over one corner of the page: whatever a
+        // click there would land on decides. Asking the window costs far more
+        // than the flags above, so only while the bar is open.
+        if finding, let frame = window.contentView?.superview,
+           let hit = frame.hitTest(frame.convert(point, from: nil)),
+           hit !== page, !hit.isDescendant(of: page) {
+            return true
+        }
+        guard folded, peeking, !frontFillsHere, let size = window.contentView?.bounds.size else { return false }
         if !prefs.sidebar { return point.y >= size.height - Metrics.strip }
         return prefs.sidePosition == .right ? point.x >= size.width - prefs.columnWidth : point.x <= prefs.columnWidth
     }
 }
 
-/// Over the window while the column or the strip is folded: the column or
-/// the strip itself while it is out, brought out by the pointer at the
+/// Over the window: the column, beside the page or folded away, and the
+/// strip while it is folded; out over the page once the pointer is at the
 /// window's chosen side, or its top edge.
 struct Fold: View {
     @ObservedObject var browser: Browser
     @ObservedObject var prefs: Preferences
+    /// The column's width while its edge is held, for the page beside it
+    /// (see HeldEdges).
+    var onDrag: (CGFloat?) -> Void = { _ in }
 
     /// The column going back in, a moment after the pointer left it.
     @State private var leaving: DispatchWorkItem?
@@ -114,7 +157,7 @@ struct Fold: View {
             // the page the top edge too, and the same band: there was nothing
             // to take hold of until the strip came down. Unfolded, the strip
             // is its own title bar, and no band lies over its tabs.
-            if prefs.sidebar || folding, browser.active?.immersed != true {
+            if prefs.sidebar || folding, !browser.frontFillsHere {
                 DragStrip()
                     .frame(height: Fold.top)
                     .frame(maxWidth: .infinity)
@@ -135,7 +178,15 @@ struct Fold: View {
             }
             ZStack(alignment: onRight ? .trailing : .leading) {
                 Color.clear.frame(width: 0)
-                if folding, prefs.sidebar {
+                if prefs.sidebar {
+                    // The one column, beside the page or folded away: ⌘S
+                    // slides it rather than trading it for another. Two
+                    // columns, one beside the page and one here for the fold,
+                    // had every row built four times over on each ⌘S, 130 to
+                    // 165ms of the main thread with 30 tabs before the slide's
+                    // first frame, against a slide of 150ms (measured
+                    // 2026-11-06, bench foldtime).
+                    //
                     // Kept while folded, off the window's edge, and slid out
                     // and back rather than made anew each time. Made anew,
                     // every row was built again on every peek, about 60ms of
@@ -156,14 +207,21 @@ struct Fold: View {
                     // rectangle either way. It wears the window's ground, as
                     // it does beside the page's card (see CardEdge), or its
                     // own white where the page is no card.
-                    SideBar(browser: browser, prefs: prefs, onFrame: browser.asCards)
-                        .modifier(FoldShadow(x: onRight ? -4 : 4, behind: true, strength: browser.peeking ? 1 : 0))
-                        .offset(x: browser.peeking ? 0 : (onRight ? prefs.columnWidth : -prefs.columnWidth))
-                        .allowsHitTesting(browser.peeking)
+                    // Away exactly when the lights are, which ride with it.
+                    SideBar(browser: browser, prefs: prefs, onFrame: browser.asCards, onDrag: onDrag)
+                        .frame(maxHeight: .infinity, alignment: .top)
+                        .modifier(FoldShadow(x: onRight ? -4 : 4, behind: true,
+                                             strength: browser.folded && browser.peeking ? 1 : 0))
+                        .offset(x: lightsOff ? (onRight ? prefs.columnWidth : -prefs.columnWidth) : 0)
+                        .allowsHitTesting(!lightsOff)
+                        .transition(.move(edge: onRight ? .trailing : .leading))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity,
                    alignment: onRight ? .trailing : .leading)
+            // As the page beside it moves (see ContentView).
+            .animation(Motion.glide, value: prefs.sidebar)
+            .animation(Motion.glide, value: prefs.sidePosition)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity,
                alignment: onRight ? .topTrailing : .topLeading)
@@ -248,7 +306,7 @@ struct Fold: View {
 
     /// Folded, and not taken over by a page filling the screen.
     private var folding: Bool {
-        browser.folded && browser.active?.immersed != true
+        browser.folded && !browser.frontFillsHere
     }
 
     private var lightsOff: Bool {
